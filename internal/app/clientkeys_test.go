@@ -83,7 +83,7 @@ func TestAuthMiddlewareUsesClientKeyPool(t *testing.T) {
 	}))
 
 	get := func(key string) int {
-		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 		if key != "" {
 			req.Header.Set("Authorization", "Bearer "+key)
 		}

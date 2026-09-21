@@ -47,12 +47,20 @@ func TestWebUIServedUnderWebuiPathOnly(t *testing.T) {
 		t.Fatalf("/ status = %d, want 401", rec.Code)
 	}
 
-	// /v1/models keeps requiring the bearer token.
+	// /v1/models is public (fork behavior) and serves the catalog without a token.
 	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d, want 200", rec.Code)
+	}
+
+	// /v1/chat/completions keeps requiring the bearer token.
+	req = httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("/v1/models status = %d, want 401", rec.Code)
+		t.Fatalf("/v1/chat/completions status = %d, want 401", rec.Code)
 	}
 }
 
@@ -62,7 +70,7 @@ func TestAuthMiddlewareRejectsMissingTokenWithCorsHeaders(t *testing.T) {
 		t.Fatal("handler should not be called")
 	})))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

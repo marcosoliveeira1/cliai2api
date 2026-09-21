@@ -45,7 +45,7 @@ func authMiddleware(cfg *Config, keys *ClientKeyPool) func(http.Handler) http.Ha
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// /health、/usage、/webui 页面和 CORS preflight 不需要 Bearer 认证；
+			// /health、/usage、/v1/models、/webui 页面和 CORS preflight 不需要 Bearer 认证；
 			// /admin/* 有独立的管理密码认证。
 			if r.Method == http.MethodOptions || isPublicPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
@@ -71,7 +71,7 @@ func authMiddleware(cfg *Config, keys *ClientKeyPool) func(http.Handler) http.Ha
 
 func isPublicPath(path string) bool {
 	switch path {
-	case "/health", "/usage", "/webui", "/webui/":
+	case "/health", "/usage", "/v1/models", "/webui", "/webui/":
 		return true
 	}
 	switch {
