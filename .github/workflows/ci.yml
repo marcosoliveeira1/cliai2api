@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["v*"]
   pull_request:
 
@@ -52,8 +52,8 @@ jobs:
   docker:
     name: Publish to GHCR
     runs-on: ubuntu-latest
-    # PRs build nothing here; images are published on master pushes and v* tags.
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    # PRs build nothing here; images are published on main pushes and v* tags.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     permissions:
       contents: read
       packages: write
