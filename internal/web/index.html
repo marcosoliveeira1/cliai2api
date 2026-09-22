@@ -449,6 +449,13 @@
       <span class="cap">Command Code API Key</span>
       <input type="text" id="acc-key" placeholder="user_…" class="mono">
     </label>
+    <label class="field">
+      <span class="cap">Gateway</span>
+      <select id="acc-gateway">
+        <option value="cmdcode">cmdcode</option>
+        <option value="zen">zen</option>
+      </select>
+    </label>
     <div class="modal-err" id="acc-add-err"></div>
     <div class="form-row">
       <button class="btn primary" id="acc-add-btn" data-i18n="acc.add">Add</button>
@@ -551,6 +558,7 @@ const I18N = {
     "common.hide": "Hide",
     "common.copy": "Copy",
     "common.name": "Name",
+    "common.gateway": "Gateway",
     "common.key": "Key",
     "common.status": "Status",
     "common.requests": "Requests",
@@ -762,6 +770,7 @@ const I18N = {
     "common.hide": "隐藏",
     "common.copy": "复制",
     "common.name": "名称",
+    "common.gateway": "网关",
     "common.key": "密钥",
     "common.status": "状态",
     "common.requests": "请求",
@@ -1408,7 +1417,7 @@ function accountCard(a) {
   return `<article class="acc-card ${mods}">
     <div class="acc-head">
       <div class="acc-id">
-        <div class="acc-name" title="${esc(a.name)}">${esc(a.name)}</div>
+        <div class="acc-name" title="${esc(a.name)}">${esc(a.name)} <span class="faint mono">[${esc(a.gateway || "cmdcode")}]</span></div>
         <div class="acc-key mono" title="${esc(a.key_masked)}">${esc(a.key_masked)}</div>
       </div>
       <div class="acc-badges">${statusBadge(a)}${authFail}</div>
@@ -1443,13 +1452,14 @@ function openAddAccount() {
 async function addAccount() {
   const key = $("#acc-key").value.trim();
   const name = $("#acc-name").value.trim();
+  const gateway = ($("#acc-gateway") && $("#acc-gateway").value) || "cmdcode";
   const err = $("#acc-add-err");
   if (!key) { err.textContent = t("acc.keyRequired"); $("#acc-key").focus(); return; }
   const btn = $("#acc-add-btn");
   btn.disabled = true;
   btn.textContent = t("acc.adding");
   try {
-    await api("/admin/api/accounts", { method: "POST", body: { name, api_key: key } });
+    await api("/admin/api/accounts", { method: "POST", body: { name, api_key: key, gateway } });
     hideModal("#acc-add-modal");
     toast(t("acc.added"));
     refreshAll();

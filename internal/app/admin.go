@@ -16,15 +16,24 @@ import (
 
 // registerAdminRoutes wires the admin JSON API used by the WebUI. It must be
 // mounted behind adminAuth.
-func registerAdminRoutes(mux *http.ServeMux, cc *CCClient, pool *AccountPool, keys *ClientKeyPool, cfg *Config, usage *UsageTracker, ring *logRing, quotas *QuotaService) {
-	mux.HandleFunc("GET /admin/api/overview", handleAdminOverview(cfg, pool, keys, usage))
-	mux.HandleFunc("GET /admin/api/accounts", handleAdminAccountsList(pool, usage))
-	mux.HandleFunc("POST /admin/api/accounts", handleAdminAccountAdd(pool, cfg, usage, quotas))
-	mux.HandleFunc("PATCH /admin/api/accounts/{id}", handleAdminAccountPatch(pool, cfg, usage, quotas))
-	mux.HandleFunc("DELETE /admin/api/accounts/{id}", handleAdminAccountDelete(pool, cfg, usage))
-	mux.HandleFunc("POST /admin/api/accounts/{id}/quota/refresh", handleAdminAccountQuotaRefresh(pool, usage, quotas))
-	mux.HandleFunc("POST /admin/api/accounts/{id}/test", handleAdminAccountTest(pool, cc))
-	mux.HandleFunc("POST /admin/api/quotas/refresh", handleAdminQuotaRefreshAll(pool, usage, quotas))
+//
+// Gateway dimension (GW-06): accounts are scoped by gateway ("cmdcode"
+// default, "zen"). The cmdcode pool arrives as pool; the zen pool arrives as
+// the optional variadic extra[0] so existing callers (server, older tests)
+// keep compiling without changes. When absent, an empty zen pool is used and
+// zen state is still persisted to cfg.Gateways["zen"] (visible after
+// restart); runServer passes the live zen pool for immediate visibility.
+func registerAdminRoutes(mux *http.ServeMux, cc *CCClient, pool *AccountPool, keys *ClientKeyPool, cfg *Config, usage *UsageTracker, ring *logRing, quotas *QuotaService, extra ...*AccountPool) {
+	zenPool := pickAdminZenPool(extra)
+	mux.HandleFunc("GET /admin/api/overview", handleAdminOverview(cfg, pool, zenPool, keys, usage))
+	mux.HandleFunc("GET /admin/api/accounts", handleAdminAccountsList(pool, zenPool, usage))
+	mux.HandleFunc("POST /admin/api/accounts", handleAdminAccountAdd(pool, zenPool, cfg, usage, quotas))
+	mux.HandleFunc("PATCH /admin/api/accounts/{id}", handleAdminAccountPatch(pool, zenPool, cfg, usage, quotas))
+	mux.HandleFunc("DELETE /admin/api/accounts/{id}", handleAdminAccountDelete(pool, zenPool, cfg, usage))
+	mux.HandleFunc("POST /admin/api/accounts/{id}/quota/refresh", handleAdminAccountQuotaRefresh(pool, zenPool, usage, quotas))
+	mux.HandleFunc("POST /admin/api/accounts/{id}/test", handleAdminAccountTest(pool, zenPool, cc, cfg))
+	mux.HandleFunc("POST /admin/api/debug/inference", handleAdminDebugInference(pool, zenPool, cc, cfg))
+	mux.HandleFunc("POST /admin/api/quotas/refresh", handleAdminQuotaRefreshAll(pool, zenPool, usage, quotas))
 	mux.HandleFunc("GET /admin/api/models", handleAdminModelsGet(cfg))
 	mux.HandleFunc("PUT /admin/api/models", handleAdminModelsPut(cfg))
 	mux.HandleFunc("GET /admin/api/keys", handleAdminKeysList(keys, usage))
@@ -60,12 +69,100 @@ func subtleConstantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// pickAdminZenPool resolves the optional zen pool from registerAdminRoutes'
+// variadic extra. Empty extra (server before wiring / older tests) yields an
+// empty pool so zen handlers still persist state to cfg.
+func pickAdminZenPool(extra []*AccountPool) *AccountPool {
+	if len(extra) > 0 && extra[0] != nil {
+		return extra[0]
+	}
+	return NewAccountPool(nil)
+}
+
+// normalizeAdminGateway maps the admin account body's gateway field to
+// "cmdcode" (absent/empty, retrocompat) or "zen" (config key GatewayZen).
+// Unknown values mirror into the cmdcode path instead of silently landing
+// in zen; the config key GatewayZen ("zen") differs from the model prefix
+// GatewayOpencode ("opencode/") by design.
+func normalizeAdminGateway(raw string) (gateway string, ok bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == GatewayCmdcode {
+		return GatewayCmdcode, true
+	}
+	if trimmed == GatewayZen {
+		return GatewayZen, true
+	}
+	return "", false
+}
+
+// adminPoolsFor returns the pool backing a normalized admin gateway.
+func adminPoolsFor(pool, zenPool *AccountPool, gateway string) *AccountPool {
+	if gateway == GatewayZen {
+		return zenPool
+	}
+	return pool
+}
+
+// recordUpstreamAttempt logs one upstream attempt with the key fingerprint
+// (account ID), HTTP status, and outcome, so a 402/403 that reaches the
+// client still names the account that produced it (issues §13 item 3).
+func recordUpstreamAttempt(gateway, fingerprint string, status int, outcome string, err error) {
+	if err != nil {
+		log.Printf("upstream attempt gateway=%s key=%s status=%d outcome=%s err=%v", gateway, fingerprint, status, outcome, err)
+		return
+	}
+	log.Printf("upstream attempt gateway=%s key=%s status=%d outcome=%s", gateway, fingerprint, status, outcome)
+}
+
+// copyErrorResponse writes an upstream failure to the client while preserving
+// the upstream message and Retry-After (issues §13 item 3). The body already
+// carries status/type/code/message; this only adds the Retry-After header.
+// Attempt logging stays with the caller (recordUpstreamAttempt), which knows
+// the gateway and key fingerprint.
+func copyErrorResponse(w http.ResponseWriter, r *http.Request, apiErr *upstreamAPIError) {
+	if apiErr.RetryAfter != "" {
+		w.Header().Set("Retry-After", apiErr.RetryAfter)
+	}
+	writeAdminJSON(w, apiErr.Status, map[string]any{"error": apiErr.Message})
+}
+
+// persistGatewayPools snapshots both pools into cfg and writes config.yaml.
+// The cmdcode pool keeps SyncToConfig's legacy-CommandCode mirror intact;
+// the zen pool is written into cfg.Gateways["zen"].Accounts (created when
+// missing) so state survives restarts.
+func persistGatewayPools(pool, zenPool *AccountPool, cfg *Config) error {
+	pool.SyncToConfig(cfg)
+	if zenPool == nil {
+		zenPool = NewAccountPool(nil)
+	}
+	accounts := zenPool.Config()
+	cfg.mu.Lock()
+	if cfg.Gateways == nil {
+		cfg.Gateways = map[string]*GatewayConfig{}
+	}
+	gc, ok := cfg.Gateways[GatewayZen]
+	if !ok || gc == nil {
+		gc = &GatewayConfig{}
+		cfg.Gateways[GatewayZen] = gc
+	}
+	gc.Accounts = accounts
+	if len(accounts) > 0 {
+		gc.APIKey = ""
+	}
+	if gc.BaseURL == "" {
+		gc.BaseURL = DefaultZenBaseURL
+	}
+	cfg.mu.Unlock()
+	return saveConfig(configFile, cfg)
+}
+
 // adminAccount merges the ephemeral health view with durable usage counters
 // and the cached quota snapshot.
 type adminAccount struct {
 	AccountView
 	UsageSnapshotEntry
-	Quota *QuotaSnapshot `json:"quota,omitempty"`
+	Gateway string         `json:"gateway"`
+	Quota   *QuotaSnapshot `json:"quota,omitempty"`
 }
 
 // localizeQuotaSnapshot returns a shallow copy of snap with the user-facing
@@ -90,21 +187,38 @@ func localizeQuotaSnapshot(lang i18n.Lang, snap *QuotaSnapshot) *QuotaSnapshot {
 }
 
 func adminAccountViews(pool *AccountPool, usage *UsageTracker, r *http.Request) []adminAccount {
+	return adminAccountViewsFor(GatewayCmdcode, pool, usage, r)
+}
+
+// adminAccountViewsFor projects one gateway's pool with its gateway label and
+// its namespaced usage/quota rows, so the WebUI lists "gateway" per account
+// (GW-06 AC1).
+func adminAccountViewsFor(gateway string, pool *AccountPool, usage *UsageTracker, r *http.Request) []adminAccount {
+	if pool == nil {
+		return []adminAccount{}
+	}
 	views := pool.Views()
 	out := make([]adminAccount, 0, len(views))
 	for _, v := range views {
 		out = append(out, adminAccount{
 			AccountView:        v,
-			UsageSnapshotEntry: usage.AccountUsage(v.ID),
+			UsageSnapshotEntry: usage.AccountUsageFor(gateway, v.ID),
+			Gateway:            gateway,
 			Quota:              localizeQuotaSnapshot(i18n.FromRequest(r), usage.Quota(v.ID)),
 		})
 	}
 	return out
 }
 
-func handleAdminOverview(cfg *Config, pool *AccountPool, keys *ClientKeyPool, usage *UsageTracker) http.HandlerFunc {
+func handleAdminOverview(cfg *Config, pool *AccountPool, zenPool *AccountPool, keys *ClientKeyPool, usage *UsageTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		total, enabled, rateLimited := pool.Stats()
+		if zenPool != nil {
+			zt, ze, zr := zenPool.Stats()
+			total += zt
+			enabled += ze
+			rateLimited += zr
+		}
 		keyTotal, keyEnabled := keys.Stats()
 		loaded := len(modelCatalog)
 		available := 0
@@ -189,51 +303,95 @@ func quotaSummary(pool *AccountPool, usage *UsageTracker) adminQuotaSummary {
 	return summary
 }
 
-func handleAdminAccountsList(pool *AccountPool, usage *UsageTracker) http.HandlerFunc {
+func handleAdminAccountsList(pool *AccountPool, zenPool *AccountPool, usage *UsageTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeAdminJSON(w, 200, map[string]any{"accounts": adminAccountViews(pool, usage, r)})
+		out := append(adminAccountViews(pool, usage, r), adminAccountViewsFor(GatewayZen, zenPool, usage, r)...)
+		if out == nil {
+			out = []adminAccount{}
+		}
+		writeAdminJSON(w, 200, map[string]any{"accounts": out})
 	}
 }
 
-func handleAdminAccountAdd(pool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
+// adminPoolsForID locates an account ID in either pool without mutating
+// either pool.
+func adminPoolsForID(pool, zenPool *AccountPool, id string) (gateway string, acct *Account, target *AccountPool) {
+	if pool != nil {
+		if acct := pool.Get(id); acct != nil {
+			return GatewayCmdcode, acct, pool
+		}
+	}
+	if zenPool != nil {
+		if acct := zenPool.Get(id); acct != nil {
+			return GatewayZen, acct, zenPool
+		}
+	}
+	return "", nil, nil
+}
+
+// gwNameFromAccount resolves the gateway owning an account ID for diagnostic
+// callers that omit the gateway field (Playground defaults to the account's
+// own gateway).
+func gwNameFromAccount(pool, zenPool *AccountPool, id string) (string, bool) {
+	if gw, _, _ := adminPoolsForID(pool, zenPool, id); gw != "" {
+		return gw, true
+	}
+	return GatewayCmdcode, false
+}
+
+func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Name   string `json:"name"`
-			APIKey string `json:"api_key"`
+			Name    string `json:"name"`
+			APIKey  string `json:"api_key"`
+			Gateway string `json:"gateway"`
 		}
 		if err := decodeJSONBody(w, r, &body); err != nil {
 			writeAdminError(w, r, 400, err.Error())
 			return
 		}
+		gateway, ok := normalizeAdminGateway(body.Gateway)
+		if !ok {
+			writeAdminError(w, r, 400, "unknown gateway")
+			return
+		}
+		target := adminPoolsFor(pool, zenPool, gateway)
 		body.Name = strings.TrimSpace(body.Name)
 		if body.Name == "" {
-			body.Name = fmt.Sprintf("account-%d", pool.Len()+1)
+			body.Name = fmt.Sprintf("account-%d", target.Len()+1)
 		}
-		acct, err := pool.Add(body.Name, body.APIKey, true)
+		acct, err := target.Add(body.Name, body.APIKey, true)
 		if err != nil {
 			writeAdminError(w, r, http.StatusConflict, err.Error())
 			return
 		}
-		if err := persistPool(pool, cfg); err != nil {
+		if err := persistGatewayPools(pool, zenPool, cfg); err != nil {
 			writeAdminError(w, r, 500, "account added but saving config failed: "+err.Error())
 			return
 		}
 		// Started without accounts? The model catalog is empty then; fetch it
-		// now so /v1/models and the Models tab fill in immediately.
-		if len(modelCatalog) == 0 && acct.Enabled {
+		// now so /v1/models and the Models tab fill in immediately. Only the
+		// cmdcode pool feeds the cmdcode catalog today (zen fetch needs a
+		// first account too, but FetchProviderModels targets cmdcode).
+		if gateway == GatewayCmdcode && len(modelCatalog) == 0 && acct.Enabled {
 			FetchProviderModels(cfg.UpstreamBaseURL(), acct.APIKey)
 		}
 		// The first quota query runs in the background so adding an account
 		// stays fast; the UI picks the snapshot up on its next poll.
 		quotas.RefreshAsync(acct)
-		log.Printf("account %q added via webui", acct.Name)
-		writeAdminJSON(w, 201, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsage(acct.ID), Quota: usage.Quota(acct.ID)})
+		log.Printf("account %q added via webui (gateway=%s)", acct.Name, gateway)
+		writeAdminJSON(w, 201, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: usage.Quota(acct.ID)})
 	}
 }
 
-func handleAdminAccountPatch(pool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
+func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		gateway, _, target := adminPoolsForID(pool, zenPool, id)
+		if target == nil {
+			writeAdminError(w, r, 404, "account not found")
+			return
+		}
 		var body struct {
 			Enabled *bool   `json:"enabled"`
 			Name    *string `json:"name"`
@@ -243,51 +401,52 @@ func handleAdminAccountPatch(pool *AccountPool, cfg *Config, usage *UsageTracker
 			writeAdminError(w, r, 400, err.Error())
 			return
 		}
-		if body.Enabled != nil && !pool.SetEnabled(id, *body.Enabled) {
+		if body.Enabled != nil && !target.SetEnabled(id, *body.Enabled) {
 			writeAdminError(w, r, 404, "account not found")
 			return
 		}
 		if body.Name != nil {
-			if !pool.Rename(id, strings.TrimSpace(*body.Name)) {
+			if !target.Rename(id, strings.TrimSpace(*body.Name)) {
 				writeAdminError(w, r, 404, "account not found")
 				return
 			}
 		}
 		keyChanged := false
 		if body.APIKey != nil {
-			newID, err := pool.SetKey(id, *body.APIKey)
+			newID, err := target.SetKey(id, *body.APIKey)
 			if err != nil {
 				writeAdminError(w, r, http.StatusConflict, err.Error())
 				return
 			}
 			// The ID derives from the key; carry the usage history over, but
 			// the cached quota belongs to the old credential and is dropped.
-			usage.MoveAccount(id, newID)
+			usage.MoveAccountFor(gateway, id, newID)
 			usage.DropQuota(id)
 			id = newID
 			keyChanged = true
 		}
-		if err := persistPool(pool, cfg); err != nil {
+		if err := persistGatewayPools(pool, zenPool, cfg); err != nil {
 			writeAdminError(w, r, 500, "saving config failed: "+err.Error())
 			return
 		}
-		acct := pool.Get(id)
+		acct := target.Get(id)
 		if keyChanged && quotas != nil {
 			quotas.RefreshAsync(acct)
 		}
-		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsage(id), Quota: usage.Quota(id)})
+		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, id), Gateway: gateway, Quota: usage.Quota(id)})
 	}
 }
 
-func handleAdminAccountDelete(pool *AccountPool, cfg *Config, usage *UsageTracker) http.HandlerFunc {
+func handleAdminAccountDelete(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !pool.Remove(id) {
+		gateway, _, target := adminPoolsForID(pool, zenPool, id)
+		if target == nil || !target.Remove(id) {
 			writeAdminError(w, r, 404, "account not found")
 			return
 		}
-		usage.DropAccount(id)
-		if err := persistPool(pool, cfg); err != nil {
+		usage.DropAccountFor(gateway, id)
+		if err := persistGatewayPools(pool, zenPool, cfg); err != nil {
 			writeAdminError(w, r, 500, "saving config failed: "+err.Error())
 			return
 		}
@@ -297,9 +456,9 @@ func handleAdminAccountDelete(pool *AccountPool, cfg *Config, usage *UsageTracke
 
 // handleAdminAccountQuotaRefresh refreshes one account's quota synchronously
 // and returns the updated account row.
-func handleAdminAccountQuotaRefresh(pool *AccountPool, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
+func handleAdminAccountQuotaRefresh(pool *AccountPool, zenPool *AccountPool, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		acct := pool.Get(r.PathValue("id"))
+		gateway, acct, _ := adminPoolsForID(pool, zenPool, r.PathValue("id"))
 		if acct == nil {
 			writeAdminError(w, r, 404, "account not found")
 			return
@@ -309,7 +468,7 @@ func handleAdminAccountQuotaRefresh(pool *AccountPool, usage *UsageTracker, quot
 			return
 		}
 		quotas.RefreshAccount(r.Context(), acct)
-		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsage(acct.ID), Quota: localizeQuotaSnapshot(i18n.FromRequest(r), usage.Quota(acct.ID))})
+		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: localizeQuotaSnapshot(i18n.FromRequest(r), usage.Quota(acct.ID))})
 	}
 }
 
@@ -317,7 +476,7 @@ func handleAdminAccountQuotaRefresh(pool *AccountPool, usage *UsageTracker, quot
 // synchronously when the body carries an id. Refreshing all returns 202
 // immediately and runs in the background — the WebUI polls and picks the
 // snapshots up as they land.
-func handleAdminQuotaRefreshAll(pool *AccountPool, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
+func handleAdminQuotaRefreshAll(pool *AccountPool, zenPool *AccountPool, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if quotas == nil {
 			writeAdminError(w, r, http.StatusServiceUnavailable, "quota service unavailable")
@@ -330,13 +489,13 @@ func handleAdminQuotaRefreshAll(pool *AccountPool, usage *UsageTracker, quotas *
 			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
 		}
 		if body.ID != "" {
-			acct := pool.Get(body.ID)
+			_, acct, _ := adminPoolsForID(pool, zenPool, body.ID)
 			if acct == nil {
 				writeAdminError(w, r, 404, "account not found")
 				return
 			}
 			quotas.RefreshAccount(r.Context(), acct)
-			writeAdminJSON(w, 200, map[string]any{"accounts": adminAccountViews(pool, usage, r)})
+			writeAdminJSON(w, 200, map[string]any{"accounts": append(adminAccountViews(pool, usage, r), adminAccountViewsFor(GatewayZen, zenPool, usage, r)...)})
 			return
 		}
 		queued := quotas.RefreshAllAsync()
@@ -535,17 +694,79 @@ func handleAdminKeyDelete(keys *ClientKeyPool, cfg *Config, usage *UsageTracker)
 }
 
 // handleAdminAccountTest probes the upstream with one account's key so the
-// user can validate a credential without sending a chat request.
-func handleAdminAccountTest(pool *AccountPool, cc *CCClient) http.HandlerFunc {
+// user can validate a credential without sending a chat request. It is the
+// legacy per-account probe; the Playground selected-key endpoint lives in
+// zen_diagnostic.go. Failures log the key fingerprint + status via
+// recordUpstreamAttempt and the error body preserves the upstream message
+// via copyErrorResponse semantics.
+func handleAdminAccountTest(pool *AccountPool, zenPool *AccountPool, cc *CCClient, cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		acct := pool.Get(r.PathValue("id"))
+		gateway, acct, _ := adminPoolsForID(pool, zenPool, r.PathValue("id"))
 		if acct == nil {
 			writeAdminError(w, r, 404, "account not found")
 			return
 		}
-		result := testAccountKey(cc.BaseURLValue(), acct.APIKey)
+		base := ""
+		if gateway == GatewayZen {
+			if cfg != nil {
+				base = cfg.GatewayBaseURL(GatewayZen)
+			}
+			if base == "" {
+				base = defaultZenBaseURL
+			}
+			status, respBody, retryAfter, requestID, latency, derr := zenDiagnosticRequest(r.Context(), base, acct.APIKey, "diagnostic-probe", []Message{{Role: "user", Content: TextContent("ping")}})
+			_ = latency
+			if derr == nil {
+				recordUpstreamAttempt(gateway, acct.ID, status, string(keyTestUsable), nil)
+				writeAdminJSON(w, 200, accountTestResult{OK: true, Status: status, Models: responseModelCount(respBody)})
+				return
+			}
+			var diagErr *diagnosticUpstreamError
+			var apiErr *upstreamAPIError
+			if isDiagErr(derr, &diagErr) && diagErr.apiErr != nil {
+				apiErr = diagErr.apiErr
+				recordUpstreamAttempt(gateway, acct.ID, apiErr.Status, string(classifyKeyTest(apiErr.Status, false)), derr)
+				copyErrorResponse(w, r, apiErr)
+				return
+			}
+			recordUpstreamAttempt(gateway, acct.ID, status, string(keyTestTransportError), derr)
+			writeAdminJSON(w, 200, accountTestResult{Error: derr.Error(), Status: status})
+			_ = requestID
+			_ = retryAfter
+			return
+		}
+		result := testAccountKey(ccBaseURL(cc, cfg), acct.APIKey)
+		if !result.OK {
+			status := result.Status
+			if status == 0 {
+				status = http.StatusBadGateway
+			}
+			recordUpstreamAttempt(gateway, acct.ID, status, "probe", nil)
+		}
 		writeAdminJSON(w, 200, result)
 	}
+}
+
+// ccBaseURL resolves the cmdcode base for the legacy probe without nil panics.
+func ccBaseURL(cc *CCClient, cfg *Config) string {
+	if cc != nil {
+		return cc.BaseURLValue()
+	}
+	if cfg != nil {
+		return cfg.UpstreamBaseURL()
+	}
+	return ""
+}
+
+// responseModelCount counts models in a decoded diagnostic response body.
+func responseModelCount(body map[string]any) int {
+	if body == nil {
+		return 0
+	}
+	if data, ok := body["data"].([]any); ok {
+		return len(data)
+	}
+	return 0
 }
 
 type accountTestResult struct {
