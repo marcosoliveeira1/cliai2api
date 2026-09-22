@@ -103,6 +103,14 @@ func adminPoolsFor(pool, zenPool *AccountPool, gateway string) *AccountPool {
 	return pool
 }
 
+func adminPoolForGateway(pool, zenPool *AccountPool, gateway, id string) (*Account, *AccountPool) {
+	target := adminPoolsFor(pool, zenPool, gateway)
+	if target == nil {
+		return nil, nil
+	}
+	return target.Get(id), target
+}
+
 // recordUpstreamAttempt logs one upstream attempt with the key fingerprint
 // (account ID), HTTP status, and outcome, so a 402/403 that reaches the
 // client still names the account that produced it (issues §13 item 3).
@@ -330,6 +338,25 @@ func adminPoolsForID(pool, zenPool *AccountPool, id string) (gateway string, acc
 	return "", nil, nil
 }
 
+// adminPoolsForRequest resolves a route account ID. The gateway query
+// parameter is optional for backwards compatibility, but required when the
+// same key-derived ID exists in both independent gateway pools.
+func adminPoolsForRequest(r *http.Request, pool, zenPool *AccountPool, id string) (gateway string, acct *Account, target *AccountPool, errMsg string) {
+	if raw := r.URL.Query().Get("gateway"); raw != "" {
+		gateway, ok := normalizeAdminGateway(raw)
+		if !ok {
+			return "", nil, nil, "unknown gateway"
+		}
+		acct, target = adminPoolForGateway(pool, zenPool, gateway, id)
+		return gateway, acct, target, ""
+	}
+	if pool != nil && zenPool != nil && pool.Get(id) != nil && zenPool.Get(id) != nil {
+		return "", nil, nil, "gateway is required when the same key exists in multiple gateways"
+	}
+	gateway, acct, target = adminPoolsForID(pool, zenPool, id)
+	return gateway, acct, target, ""
+}
+
 // gwNameFromAccount resolves the gateway owning an account ID for diagnostic
 // callers that omit the gateway field (Playground defaults to the account's
 // own gateway).
@@ -384,7 +411,11 @@ func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config,
 func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		gateway, _, target := adminPoolsForID(pool, zenPool, id)
+		gateway, _, target, errMsg := adminPoolsForRequest(r, pool, zenPool, id)
+		if errMsg != "" {
+			writeAdminError(w, r, http.StatusConflict, errMsg)
+			return
+		}
 		if target == nil {
 			writeAdminError(w, r, 404, "account not found")
 			return
@@ -437,7 +468,11 @@ func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Confi
 func handleAdminAccountDelete(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		gateway, _, target := adminPoolsForID(pool, zenPool, id)
+		gateway, _, target, errMsg := adminPoolsForRequest(r, pool, zenPool, id)
+		if errMsg != "" {
+			writeAdminError(w, r, http.StatusConflict, errMsg)
+			return
+		}
 		if target == nil || !target.Remove(id) {
 			writeAdminError(w, r, 404, "account not found")
 			return
@@ -455,7 +490,11 @@ func handleAdminAccountDelete(pool *AccountPool, zenPool *AccountPool, cfg *Conf
 // and returns the updated account row.
 func handleAdminAccountQuotaRefresh(pool *AccountPool, zenPool *AccountPool, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		gateway, acct, _ := adminPoolsForID(pool, zenPool, r.PathValue("id"))
+		gateway, acct, _, errMsg := adminPoolsForRequest(r, pool, zenPool, r.PathValue("id"))
+		if errMsg != "" {
+			writeAdminError(w, r, http.StatusConflict, errMsg)
+			return
+		}
 		if acct == nil {
 			writeAdminError(w, r, 404, "account not found")
 			return
@@ -700,7 +739,11 @@ func handleAdminKeyDelete(keys *ClientKeyPool, cfg *Config, usage *UsageTracker)
 // via copyErrorResponse semantics.
 func handleAdminAccountTest(pool *AccountPool, zenPool *AccountPool, cc *CCClient, cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		gateway, acct, _ := adminPoolsForID(pool, zenPool, r.PathValue("id"))
+		gateway, acct, _, errMsg := adminPoolsForRequest(r, pool, zenPool, r.PathValue("id"))
+		if errMsg != "" {
+			writeAdminError(w, r, http.StatusConflict, errMsg)
+			return
+		}
 		if acct == nil {
 			writeAdminError(w, r, 404, "account not found")
 			return

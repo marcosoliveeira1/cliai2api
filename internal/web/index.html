@@ -1186,10 +1186,14 @@ function quotaDetail(a) {
     ${errs.length ? `<div class="quota-err">${t("quota.errorPrefix")} ${esc(errs.join(", "))}</div>` : ""}`;
 }
 
-async function refreshAccountQuota(id) {
+function accountURL(id, gateway, suffix = "") {
+  return "/admin/api/accounts/" + encodeURIComponent(id) + suffix + "?gateway=" + encodeURIComponent(gateway || "cmdcode");
+}
+
+async function refreshAccountQuota(id, gateway) {
   toast(t("quota.refreshing"));
   try {
-    await api("/admin/api/accounts/" + id + "/quota/refresh", { method: "POST" });
+    await api(accountURL(id, gateway, "/quota/refresh"), { method: "POST" });
     toast(t("quota.refreshedOne"));
     refreshAll();
   } catch (e) { toast(e.message, true); }
@@ -1430,11 +1434,11 @@ function accountCard(a) {
     </div>
     <div class="acc-sec">${quotaDetail(a)}</div>
     <div class="acc-actions">
-      <button class="btn small" onclick="refreshAccountQuota('${a.id}')">${esc(t("quota.refreshOne"))}</button>
-      <button class="btn small" onclick="testAccount('${a.id}')">${esc(t("common.test"))}</button>
-      <button class="btn small" onclick="openAccountEdit('${a.id}', '${esc(a.name)}')">${esc(t("common.edit"))}</button>
-      <button class="btn small" onclick="toggleAccount('${a.id}', ${a.enabled ? "false" : "true"})">${a.enabled ? esc(t("common.disable")) : esc(t("common.enable"))}</button>
-      <button class="btn small danger" onclick="deleteAccount('${a.id}', '${esc(a.name)}')">${esc(t("common.delete"))}</button>
+      <button class="btn small" onclick="refreshAccountQuota('${a.id}', '${a.gateway || "cmdcode"}')">${esc(t("quota.refreshOne"))}</button>
+      <button class="btn small" onclick="testAccount('${a.id}', '${a.gateway || "cmdcode"}')">${esc(t("common.test"))}</button>
+      <button class="btn small" onclick="openAccountEdit('${a.id}', '${esc(a.name)}', '${a.gateway || "cmdcode"}')">${esc(t("common.edit"))}</button>
+      <button class="btn small" onclick="toggleAccount('${a.id}', '${a.gateway || "cmdcode"}', ${a.enabled ? "false" : "true"})">${a.enabled ? esc(t("common.disable")) : esc(t("common.enable"))}</button>
+      <button class="btn small danger" onclick="deleteAccount('${a.id}', '${a.gateway || "cmdcode"}', '${esc(a.name)}')">${esc(t("common.delete"))}</button>
     </div>
     ${a.last_error ? `<div class="err-line">${esc(t("acc.lastError", { time: relTime(a.last_error_at), msg: a.last_error }))}</div>` : ""}
   </article>`;
@@ -1472,25 +1476,25 @@ async function addAccount() {
   }
 }
 
-async function toggleAccount(id, enabled) {
+async function toggleAccount(id, gateway, enabled) {
   try {
-    await api("/admin/api/accounts/" + id, { method: "PATCH", body: { enabled } });
+    await api(accountURL(id, gateway), { method: "PATCH", body: { enabled } });
     toast(enabled ? t("acc.enabledToast") : t("acc.disabledToast"));
     refreshAll();
   } catch (e) { toast(e.message, true); }
 }
 
-async function deleteAccount(id, name) {
+async function deleteAccount(id, gateway, name) {
   if (!confirm(t("acc.confirmDelete", { name }))) return;
   try {
-    await api("/admin/api/accounts/" + id, { method: "DELETE" });
+    await api(accountURL(id, gateway), { method: "DELETE" });
     toast(t("acc.deleted"));
     refreshAll();
   } catch (e) { toast(e.message, true); }
 }
 
-function openAccountEdit(id, name) {
-  state.editingAccount = id;
+function openAccountEdit(id, name, gateway) {
+  state.editingAccount = { id, gateway };
   $("#acct-edit-name").value = name;
   $("#acct-edit-key").value = "";
   $("#acct-modal").style.display = "";
@@ -1498,23 +1502,23 @@ function openAccountEdit(id, name) {
 }
 
 async function saveAccountEdit() {
-  const id = state.editingAccount;
-  if (!id) return;
+  const account = state.editingAccount;
+  if (!account) return;
   const body = { name: $("#acct-edit-name").value.trim() };
   const newKey = $("#acct-edit-key").value.trim();
   if (newKey) body.api_key = newKey;
   try {
-    await api("/admin/api/accounts/" + id, { method: "PATCH", body });
+    await api(accountURL(account.id, account.gateway), { method: "PATCH", body });
     hideModal("#acct-modal");
     toast(t("acc.updated"));
     refreshAll();
   } catch (e) { toast(e.message, true); }
 }
 
-async function testAccount(id) {
+async function testAccount(id, gateway) {
   toast(t("acc.testing"));
   try {
-    const r = await api(`/admin/api/accounts/${id}/test`, { method: "POST" });
+    const r = await api(accountURL(id, gateway, "/test"), { method: "POST" });
     if (r.ok) toast(t("acc.testOk", { status: r.status, models: r.models, ms: r.latency_ms }));
     else toast(t("acc.testFail", { error: r.error || ("HTTP " + r.status) }), true);
   } catch (e) { toast(e.message, true); }

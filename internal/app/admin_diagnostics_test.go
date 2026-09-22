@@ -134,6 +134,29 @@ func TestAdminAccountsCreateZenPoolAndPersist(t *testing.T) {
 	}
 }
 
+func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
+	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {
+		return http.StatusOK, nil, `{"id":"x","object":"chat.completion","choices":[]}`
+	})
+	srv, pool, zenPool := gatewayDiscoverEnv(t, fake.srv.URL)
+	_, zen := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
+		map[string]any{"name": "zen", "api_key": "shared-key", "gateway": "zen"})
+	_, cmdcode := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
+		map[string]any{"name": "cmdcode", "api_key": "shared-key", "gateway": "cmdcode"})
+	id := zen["id"].(string)
+	if cmdcode["id"] != id {
+		t.Fatalf("shared key IDs differ: zen=%s cmdcode=%v", id, cmdcode["id"])
+	}
+
+	resp, _ := adminRequest(t, srv, "DELETE", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete zen status = %d, want 200", resp.StatusCode)
+	}
+	if zenPool.Get(id) != nil || pool.Get(id) == nil {
+		t.Fatalf("pools after zen delete: cmdcode=%v zen=%v", pool.Get(id), zenPool.Get(id))
+	}
+}
+
 // GW-06: unknown gateway is a 400, not a silent default.
 func TestAdminAccountsCreateUnknownGateway(t *testing.T) {
 	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {

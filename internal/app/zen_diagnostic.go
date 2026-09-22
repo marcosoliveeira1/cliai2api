@@ -174,7 +174,8 @@ func handleAdminDebugInference(pool *AccountPool, zenPool *AccountPool, cc *CCCl
 			writeAdminError(w, r, 400, "model is required")
 			return
 		}
-		gwName, acct, _ := adminPoolsForID(pool, zenPool, body.AccountID)
+		gwName := gateway
+		acct, _ := adminPoolForGateway(pool, zenPool, gwName, body.AccountID)
 		if acct == nil {
 			writeAdminJSON(w, 200, map[string]any{
 				"ok": false, "http_status": 0, "request_id": "", "route": gateway,
