@@ -532,7 +532,7 @@ func (g *CCGateway) Chat(ctx context.Context, req *ChatRequest) (*http.Response,
 // at union time). It mirrors the in-memory bucket written by
 // FetchProviderModels.
 func (g *CCGateway) FetchModels() []ModelInfo {
-	return append([]ModelInfo(nil), modelCatalogs[GatewayCmdcode]...)
+	return gatewayCatalogSnapshot(GatewayCmdcode)
 }
 
 // resolveModelName 将客户端传来的 model ID 映射为 CC API 期望的格式。
@@ -545,7 +545,7 @@ func resolveModelName(model string) string {
 	}
 
 	// 在动态 catalog 中查找匹配的 ID（catalog 中的 ID 已含正确前缀）
-	for _, m := range modelCatalog {
+	for _, m := range modelCatalogSnapshot() {
 		if m.ID == model || strings.HasSuffix(m.ID, "/"+model) {
 			return m.ID
 		}

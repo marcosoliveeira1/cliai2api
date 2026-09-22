@@ -91,9 +91,13 @@ func TestAdminAccountsGatewayListAndDefault(t *testing.T) {
 // independent, no 409 across gateways).
 func TestAdminAccountsCreateZenPoolAndPersist(t *testing.T) {
 	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			return http.StatusOK, nil, `{"object":"list","data":[{"id":"deepseek-v4-flash","object":"model"}]}`
+		}
 		return http.StatusOK, nil, `{"id":"x","object":"chat.completion","choices":[]}`
 	})
 	srv, pool, zenPool := gatewayDiscoverEnv(t, fake.srv.URL)
+	seedCatalogs(t, nil, nil)
 
 	resp, payload := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
 		map[string]any{"name": "z1", "api_key": "zen-key-1", "gateway": "zen"})
@@ -105,6 +109,9 @@ func TestAdminAccountsCreateZenPoolAndPersist(t *testing.T) {
 	}
 	if zenPool.Len() != 1 || pool.Len() != 0 {
 		t.Fatalf("pools: cmdcode=%d zen=%d, want 0/1", pool.Len(), zenPool.Len())
+	}
+	if got := modelIDs(ModelList{Data: modelCatalogSnapshot()}); !got[OpencodePrefix+"deepseek-v4-flash"] {
+		t.Fatalf("catalog = %v, want Zen model after account add", got)
 	}
 	row := accountRowByName(t, srv, "z1")
 	if row["gateway"] != GatewayZen {
@@ -229,6 +236,7 @@ func TestDebugInferenceSelectedKeyNoFailoverNoMutation(t *testing.T) {
 	_, created := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
 		map[string]any{"name": "zsel", "api_key": "zen-sel-key", "gateway": "zen"})
 	id := created["id"].(string)
+	before := len(fake.all()) // Account creation refreshes the Zen model catalog.
 
 	status, payload := debugInference(t, srv, map[string]any{
 		"gateway": "zen", "account_id": id, "model": "deepseek-v4-flash",
@@ -246,8 +254,8 @@ func TestDebugInferenceSelectedKeyNoFailoverNoMutation(t *testing.T) {
 	if payload["fingerprint"] != id {
 		t.Fatalf("fingerprint = %v, want account id %s", payload["fingerprint"], id)
 	}
-	if calls != 1 || len(fake.all()) != 1 {
-		t.Fatalf("upstream calls = %d, want exactly 1", len(fake.all()))
+	if calls != before+1 || len(fake.all()) != before+1 {
+		t.Fatalf("diagnostic calls = %d, want exactly 1 after catalog refresh", len(fake.all())-before)
 	}
 	acct := zenPool.Get(id)
 	if acct == nil {
@@ -271,6 +279,7 @@ func TestDebugInference402IsRequestError(t *testing.T) {
 	_, created := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
 		map[string]any{"name": "z402", "api_key": "zen-402-key", "gateway": "zen"})
 	id := created["id"].(string)
+	before := len(fake.all()) // Account creation refreshes the Zen model catalog.
 
 	_, payload := debugInference(t, srv, map[string]any{
 		"gateway": "zen", "account_id": id, "model": "deepseek-v4-flash",
@@ -282,8 +291,8 @@ func TestDebugInference402IsRequestError(t *testing.T) {
 	if !strings.Contains(payload["error"].(string), "Insufficient account funds") {
 		t.Fatalf("error lost upstream message: %v", payload["error"])
 	}
-	if len(fake.all()) != 1 {
-		t.Fatalf("upstream calls = %d, want 1", len(fake.all()))
+	if len(fake.all()) != before+1 {
+		t.Fatalf("diagnostic calls = %d, want 1", len(fake.all())-before)
 	}
 	if got := zenPool.Get(id).Errors.Load(); got != 0 {
 		t.Fatalf("pool mutated on 402: errors = %d", got)

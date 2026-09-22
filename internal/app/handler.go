@@ -406,8 +406,9 @@ func handleModels(cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		excludes := cfg.Excludes()
-		filtered := make([]ModelInfo, 0, len(modelCatalog))
-		for _, m := range modelCatalog {
+		catalog := modelCatalogSnapshot()
+		filtered := make([]ModelInfo, 0, len(catalog))
+		for _, m := range catalog {
 			if !isModelExcluded(m.ID, excludes) {
 				filtered = append(filtered, m)
 			}

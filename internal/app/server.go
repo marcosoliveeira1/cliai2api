@@ -255,7 +255,7 @@ func runServer(reg *Registry, cfg *Config, usage *UsageTracker, ring *logRing) e
 	log.Printf("client keys: %d configured, %d enabled", keys.Len(), keys.EnabledCount())
 	loadedModels := len(availableModels())
 	availableCount := 0
-	for _, model := range modelCatalog {
+	for _, model := range modelCatalogSnapshot() {
 		if !isModelExcluded(model.ID, cfg.Excludes()) {
 			availableCount++
 		}

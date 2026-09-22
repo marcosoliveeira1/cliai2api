@@ -220,9 +220,10 @@ func handleAdminOverview(cfg *Config, pool *AccountPool, zenPool *AccountPool, k
 			rateLimited += zr
 		}
 		keyTotal, keyEnabled := keys.Stats()
-		loaded := len(modelCatalog)
+		catalog := modelCatalogSnapshot()
+		loaded := len(catalog)
 		available := 0
-		for _, m := range modelCatalog {
+		for _, m := range catalog {
 			if !isModelExcluded(m.ID, cfg.Excludes()) {
 				available++
 			}
@@ -369,12 +370,8 @@ func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config,
 			writeAdminError(w, r, 500, "account added but saving config failed: "+err.Error())
 			return
 		}
-		// Started without accounts? The model catalog is empty then; fetch it
-		// now so /v1/models and the Models tab fill in immediately. Only the
-		// cmdcode pool feeds the cmdcode catalog today (zen fetch needs a
-		// first account too, but FetchProviderModels targets cmdcode).
-		if gateway == GatewayCmdcode && len(modelCatalog) == 0 && acct.Enabled {
-			FetchProviderModels(cfg.UpstreamBaseURL(), acct.APIKey)
+		if acct.Enabled {
+			refreshGatewayCatalog(gateway, cfg, target)
 		}
 		// The first quota query runs in the background so adding an account
 		// stays fast; the UI picks the snapshot up on its next poll.
@@ -515,8 +512,9 @@ type adminModel struct {
 func handleAdminModelsGet(cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		excludes := cfg.Excludes()
-		models := make([]adminModel, 0, len(modelCatalog))
-		for _, m := range modelCatalog {
+		catalog := modelCatalogSnapshot()
+		models := make([]adminModel, 0, len(catalog))
+		for _, m := range catalog {
 			models = append(models, adminModel{ID: m.ID, Exposed: !isModelExcluded(m.ID, excludes)})
 		}
 		writeAdminJSON(w, 200, map[string]any{"models": models, "exclude_models": excludes})
@@ -541,9 +539,10 @@ func handleAdminModelsPut(cfg *Config) http.HandlerFunc {
 			exposed[strings.TrimSpace(id)] = true
 		}
 
-		excludes := make([]string, 0, len(modelCatalog))
-		known := make(map[string]bool, len(modelCatalog))
-		for _, m := range modelCatalog {
+		catalog := modelCatalogSnapshot()
+		excludes := make([]string, 0, len(catalog))
+		known := make(map[string]bool, len(catalog))
+		for _, m := range catalog {
 			known[m.ID] = true
 			if !exposed[m.ID] {
 				excludes = append(excludes, m.ID)
@@ -1062,8 +1061,8 @@ func addOAuthAccount(pool *AccountPool, cfg *Config, quotas *QuotaService, cb oa
 	if err := persistPool(pool, cfg); err != nil {
 		return nil, err
 	}
-	if len(modelCatalog) == 0 && acct.Enabled {
-		FetchProviderModels(cfg.UpstreamBaseURL(), acct.APIKey)
+	if acct.Enabled {
+		refreshGatewayCatalog(GatewayCmdcode, cfg, pool)
 	}
 	quotas.RefreshAsync(acct)
 	return acct, nil

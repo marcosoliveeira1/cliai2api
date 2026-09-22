@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,25 +14,29 @@ import (
 // modelCatalog is the unified view served by GET /v1/models: every entry
 // carries its gateway prefix (cmdcode/<id>, opencode/<id>). It is rebuilt
 // from the buckets on every update — fetch paths never write it directly.
-var modelCatalogs = map[string][]ModelInfo{}
-
-var modelCatalog []ModelInfo
+var (
+	modelCatalogMu sync.RWMutex
+	modelCatalogs  = map[string][]ModelInfo{}
+	modelCatalog   []ModelInfo
+)
 
 // SetGatewayCatalog replaces one gateway's raw catalog and rebuilds the
 // unified prefixed view. A nil slice clears the bucket (empty contribution)
 // without touching the other gateway.
 func setGatewayCatalog(gateway string, models []ModelInfo) {
+	modelCatalogMu.Lock()
+	defer modelCatalogMu.Unlock()
 	if modelCatalogs == nil {
 		modelCatalogs = map[string][]ModelInfo{}
 	}
 	modelCatalogs[gateway] = append([]ModelInfo(nil), models...)
-	refreshUnifiedCatalog()
+	refreshUnifiedCatalogLocked()
 }
 
 // refreshUnifiedCatalog rebuilds modelCatalog as the union of the per-gateway
 // buckets with the gateway prefix applied. Gateway order is fixed so the
 // listing is deterministic; a gateway without accounts contributes nothing.
-func refreshUnifiedCatalog() {
+func refreshUnifiedCatalogLocked() {
 	unified := make([]ModelInfo, 0)
 	for _, gateway := range []string{GatewayCmdcode, GatewayOpencode} {
 		for _, m := range modelCatalogs[gateway] {
@@ -40,6 +45,18 @@ func refreshUnifiedCatalog() {
 		}
 	}
 	modelCatalog = unified
+}
+
+func modelCatalogSnapshot() []ModelInfo {
+	modelCatalogMu.RLock()
+	defer modelCatalogMu.RUnlock()
+	return append([]ModelInfo(nil), modelCatalog...)
+}
+
+func gatewayCatalogSnapshot(gateway string) []ModelInfo {
+	modelCatalogMu.RLock()
+	defer modelCatalogMu.RUnlock()
+	return append([]ModelInfo(nil), modelCatalogs[gateway]...)
 }
 
 // FetchProviderModels 从 CC API 拉取模型列表，填充 cmdcode gateway 的 bucket。
@@ -84,12 +101,35 @@ func FetchProviderModels(baseURL, apiKey string) {
 		})
 	}
 	setGatewayCatalog(GatewayCmdcode, catalog)
-	log.Printf("models: %d loaded from %s", len(modelCatalogs[GatewayCmdcode]), url)
+	log.Printf("models: %d loaded from %s", len(gatewayCatalogSnapshot(GatewayCmdcode)), url)
+}
+
+// refreshGatewayCatalog updates one gateway after its account configuration
+// changes. Failed fetches keep the last successful catalog; no enabled account
+// clears only that gateway's contribution.
+func refreshGatewayCatalog(gateway string, cfg *Config, pool *AccountPool) {
+	if pool == nil || pool.Primary() == nil {
+		setGatewayCatalog(gateway, nil)
+		return
+	}
+
+	switch gateway {
+	case GatewayCmdcode:
+		FetchProviderModels(cfg.UpstreamBaseURL(), pool.Primary().APIKey)
+	case GatewayZen:
+		models := NewZenClientWithPool(pool, cfg.GatewayBaseURL(GatewayZen)).FetchModels()
+		if len(models) == 0 {
+			log.Printf("[WARN] fetch zen models failed; keeping existing zen catalog")
+			return
+		}
+		setGatewayCatalog(GatewayOpencode, models)
+	}
 }
 
 func availableModels() []string {
-	out := make([]string, 0, len(modelCatalog))
-	for _, model := range modelCatalog {
+	models := modelCatalogSnapshot()
+	out := make([]string, 0, len(models))
+	for _, model := range models {
 		out = append(out, model.ID)
 	}
 	return out
