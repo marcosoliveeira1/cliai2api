@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -70,6 +71,22 @@ func (c *UsageCounters) snapshot() UsageSnapshotEntry {
 	}
 }
 
+// usageNamespaceKey builds the namespaced account counter key
+// ("gateway:accountID"). Legacy account IDs never contain a colon, which is
+// what lets loadUsage treat keys without ":" as cmdcode counters.
+func usageNamespaceKey(gateway, id string) string {
+	return gateway + ":" + id
+}
+
+// usageNamespaceSplit reverses usageNamespaceKey. Bare legacy IDs (without
+// ":") read as cmdcode counters; keys already namespaced keep their gateway.
+func usageNamespaceSplit(key string) (gateway, id string) {
+	if gateway, id, ok := strings.Cut(key, ":"); ok && gateway != "" && id != "" {
+		return gateway, id
+	}
+	return GatewayCmdcode, key
+}
+
 func (u *UsageTracker) Record(prompt, completion, cacheRead, cacheWrite int) {
 	u.TotalRequests.Add(1)
 	u.PromptTokens.Add(int64(prompt))
@@ -83,7 +100,7 @@ func (u *UsageTracker) Record(prompt, completion, cacheRead, cacheWrite int) {
 }
 
 // ForAccount returns a recorder that mirrors usage into the per-account
-// counters. A nil account records globally only.
+// counters in the cmdcode namespace. A nil account records globally only.
 func (u *UsageTracker) ForAccount(a *Account) usageRecorder {
 	if a == nil {
 		return u
@@ -91,7 +108,16 @@ func (u *UsageTracker) ForAccount(a *Account) usageRecorder {
 	return u.Recorder(a.ID, "")
 }
 
+// ForAccountForGateway is ForAccount scoped to one gateway's counters.
+func (u *UsageTracker) ForAccountForGateway(gateway string, a *Account) usageRecorder {
+	if a == nil {
+		return u
+	}
+	return u.RecorderWithGateway(gateway, a.ID, "")
+}
+
 // RecorderFor is a nil-safe Recorder wrapper taking the served account.
+// It keeps recording into the cmdcode namespace for legacy callers.
 func (u *UsageTracker) RecorderFor(a *Account, clientKeyID string) usageRecorder {
 	if a == nil {
 		return u.Recorder("", clientKeyID)
@@ -99,13 +125,30 @@ func (u *UsageTracker) RecorderFor(a *Account, clientKeyID string) usageRecorder
 	return u.Recorder(a.ID, clientKeyID)
 }
 
+// RecorderForGateway is a nil-safe Recorder wrapper recording into one
+// gateway's counters.
+func (u *UsageTracker) RecorderForGateway(gateway string, a *Account, clientKeyID string) usageRecorder {
+	if a == nil {
+		return u.RecorderWithGateway(gateway, "", clientKeyID)
+	}
+	return u.RecorderWithGateway(gateway, a.ID, clientKeyID)
+}
+
 // Recorder returns a recorder that mirrors usage into the per-account and
-// per-client-key counters for every non-empty ID.
+// per-client-key counters for every non-empty ID. It keeps the cmdcode
+// namespace so existing callers retain their semantics.
 func (u *UsageTracker) Recorder(accountID, clientKeyID string) usageRecorder {
+	return u.RecorderWithGateway(GatewayCmdcode, accountID, clientKeyID)
+}
+
+// RecorderWithGateway records like Recorder but namespaces the account
+// counters by gateway ("gateway:accountID"). Client-key counters stay
+// gateway-agnostic.
+func (u *UsageTracker) RecorderWithGateway(gateway, accountID, clientKeyID string) usageRecorder {
 	if accountID == "" && clientKeyID == "" {
 		return u
 	}
-	return &mirrorUsageRecorder{tracker: u, accountID: accountID, clientKeyID: clientKeyID}
+	return &mirrorUsageRecorder{tracker: u, accountID: u.accountKeyFor(gateway, accountID), clientKeyID: clientKeyID}
 }
 
 type mirrorUsageRecorder struct {
@@ -179,9 +222,31 @@ func (u *UsageTracker) countersFor(m *map[string]*UsageCounters, id string) Usag
 	return c.snapshot()
 }
 
-// AccountUsage returns a snapshot of one account's durable counters.
+// accountKeyFor namespaces an account ID by gateway. Empty IDs and already
+// namespaced keys pass through so load-time migration never double-prefixes.
+func (u *UsageTracker) accountKeyFor(gateway, id string) string {
+	if id == "" {
+		return ""
+	}
+	if _, current := usageNamespaceSplit(id); current != id {
+		return id
+	}
+	if gateway == "" {
+		gateway = GatewayCmdcode
+	}
+	return usageNamespaceKey(gateway, id)
+}
+
+// AccountUsage returns a snapshot of one account's durable counters in the
+// cmdcode namespace, preserving the legacy single-gateway semantics.
 func (u *UsageTracker) AccountUsage(id string) UsageSnapshotEntry {
-	return u.countersFor(&u.accounts, id)
+	return u.AccountUsageFor(GatewayCmdcode, id)
+}
+
+// AccountUsageFor returns a snapshot of one account's counters namespaced by
+// gateway.
+func (u *UsageTracker) AccountUsageFor(gateway, id string) UsageSnapshotEntry {
+	return u.countersFor(&u.accounts, u.accountKeyFor(gateway, id))
 }
 
 // ClientKeyUsage returns a snapshot of one client key's durable counters.
@@ -190,11 +255,19 @@ func (u *UsageTracker) ClientKeyUsage(id string) UsageSnapshotEntry {
 }
 
 // DropAccount forgets a removed account's counters and quota snapshot so they
-// stop persisting.
+// stop persisting. It keeps dropping the cmdcode-namespace entry.
 func (u *UsageTracker) DropAccount(id string) {
+	u.DropAccountFor(GatewayCmdcode, id)
+}
+
+// DropAccountFor forgets one gateway's counters for a removed account.
+func (u *UsageTracker) DropAccountFor(gateway, id string) {
+	if id == "" {
+		return
+	}
 	u.accMu.Lock()
 	defer u.accMu.Unlock()
-	delete(u.accounts, id)
+	delete(u.accounts, u.accountKeyFor(gateway, id))
 	delete(u.quotas, id)
 }
 
@@ -240,22 +313,34 @@ func (u *UsageTracker) quotaSnapshot() map[string]*QuotaSnapshot {
 }
 
 // MoveAccount migrates counters when an account's key (and therefore ID)
-// changes. Counters are merged if the target already has any.
+// changes. Counters are merged if the target already has any. It keeps
+// migrating the cmdcode-namespace counters.
 func (u *UsageTracker) MoveAccount(oldID, newID string) {
+	u.MoveAccountFor(GatewayCmdcode, oldID, newID)
+}
+
+// MoveAccountFor migrates one gateway's counters when an account's key (and
+// therefore ID) changes. Counters are merged if the target already has any.
+func (u *UsageTracker) MoveAccountFor(gateway, oldID, newID string) {
 	if oldID == "" || newID == "" || oldID == newID {
+		return
+	}
+	oldKey := u.accountKeyFor(gateway, oldID)
+	newKey := u.accountKeyFor(gateway, newID)
+	if oldKey == newKey {
 		return
 	}
 	u.accMu.Lock()
 	defer u.accMu.Unlock()
 	u.ensureMapsLocked()
-	old := u.accounts[oldID]
+	old := u.accounts[oldKey]
 	if old == nil {
 		return
 	}
-	delete(u.accounts, oldID)
-	target := u.accounts[newID]
+	delete(u.accounts, oldKey)
+	target := u.accounts[newKey]
 	if target == nil {
-		u.accounts[newID] = old
+		u.accounts[newKey] = old
 		return
 	}
 	target.Requests.Add(old.Requests.Load())
@@ -353,9 +438,22 @@ func loadUsage() *UsageTracker {
 	u.accMu.Lock()
 	u.ensureMapsLocked()
 	for id, entry := range snap.Accounts {
+		// Lazy migration: keys persisted before namespacing (no ":") belong
+		// to cmdcode. Colliding legacy + namespaced entries merge instead of
+		// duplicating. Counters created here stay in memory; save() writes
+		// the namespaced keys back.
+		key := u.accountKeyFor(GatewayCmdcode, id)
+		if c, ok := u.accounts[key]; ok {
+			c.Requests.Add(entry.Requests)
+			c.PromptTokens.Add(entry.PromptTokens)
+			c.CompletionTokens.Add(entry.CompletionTokens)
+			c.CacheReadTokens.Add(entry.CacheReadTokens)
+			c.CacheWriteTokens.Add(entry.CacheWriteTokens)
+			continue
+		}
 		c := &UsageCounters{}
 		c.restore(entry)
-		u.accounts[id] = c
+		u.accounts[key] = c
 	}
 	for id, entry := range snap.ClientKeys {
 		c := &UsageCounters{}
