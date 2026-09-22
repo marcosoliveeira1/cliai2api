@@ -259,8 +259,9 @@ func TestClientKeyRecorderFlowThroughHandler(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	cc := NewCCClient("cc-smoke", upstream.URL)
-	handleChatCompletions(cc, &Config{}, usage).ServeHTTP(rec, req)
+	cc := NewCCGateway(NewCCClient("cc-smoke", upstream.URL))
+	zen := &stubGateway{name: GatewayOpencode, prefix: OpencodePrefix, pool: NewAccountPool(nil)}
+	handleChatCompletions(NewRegistry(GatewayCmdcode, cc, zen), &Config{}, usage).ServeHTTP(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("handler status = %d, body = %s", rec.Code, rec.Body.String())

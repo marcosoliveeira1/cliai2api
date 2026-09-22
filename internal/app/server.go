@@ -164,12 +164,22 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func runServer(cc *CCClient, cfg *Config, usage *UsageTracker, ring *logRing) error {
+func runServer(reg *Registry, cfg *Config, usage *UsageTracker, ring *logRing) error {
 	serverStartedAt = time.Now()
 
-	pool := cc.Pool
+	cmdcodeGw := reg.Get(GatewayCmdcode)
+	ccGateway, _ := cmdcodeGw.(*CCGateway)
+	var cc *CCClient
+	var pool *AccountPool
+	if ccGateway != nil && ccGateway.cc != nil {
+		cc = ccGateway.cc
+		pool = cc.Pool
+	}
 	if pool == nil {
 		pool = NewAccountPool(nil)
+	}
+	if cc == nil {
+		cc = NewCCClientWithPool(pool, cfg.UpstreamBaseURL())
 	}
 	keys := NewClientKeyPool(cfg.APIKeys)
 	quotas := NewQuotaService(cc, pool, usage)
@@ -180,7 +190,7 @@ func runServer(cc *CCClient, cfg *Config, usage *UsageTracker, ring *logRing) er
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
-	mux.HandleFunc("/v1/chat/completions", handleChatCompletions(cc, cfg, usage))
+	mux.HandleFunc("/v1/chat/completions", handleChatCompletions(reg, cfg, usage))
 	mux.HandleFunc("/v1/models", handleModels(cfg))
 	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -154,8 +154,17 @@ Use the local client key above as the Bearer token for your OpenAI client.
 	ring := newLogRing()
 	log.SetOutput(io.MultiWriter(os.Stderr, ring))
 
+	if cfg.GatewayBaseURL(GatewayZen) == "" {
+		cfg.SetGatewayBaseURL(GatewayZen, DefaultZenBaseURL)
+	}
 	pool := NewAccountPool(cfg.CommandCode.Accounts)
 	cc := NewCCClientWithPool(pool, cfg.UpstreamBaseURL())
+	zenPool := NewAccountPool(nil)
+	if gc := cfg.Gateways[GatewayZen]; gc != nil {
+		zenPool = NewAccountPool(gc.Accounts)
+	}
+	zen := NewZenClientWithPool(zenPool, cfg.GatewayBaseURL(GatewayZen))
+	reg := NewRegistry(GatewayCmdcode, NewCCGateway(cc), zen)
 	usage := loadUsage()
 
 	if primary := pool.Primary(); primary != nil {
@@ -163,13 +172,20 @@ Use the local client key above as the Bearer token for your OpenAI client.
 	} else {
 		log.Printf("[WARN] no enabled Command Code accounts; starting with an empty model catalog")
 	}
+	if primary := zenPool.Primary(); primary != nil {
+		if models := zen.FetchModels(); len(models) > 0 {
+			setGatewayCatalog(GatewayOpencode, models)
+		} else {
+			log.Printf("[WARN] fetch zen models failed; starting with an empty zen catalog")
+		}
+	}
 
-	log.Printf("accounts: %d configured, %d enabled", pool.Len(), pool.EnabledCount())
+	log.Printf("accounts: %d configured, %d enabled", pool.Len()+zenPool.Len(), pool.EnabledCount()+zenPool.EnabledCount())
 	if adminPasswordGenerated {
 		fmt.Printf("WebUI admin password generated: %s\n", cfg.adminPassword())
 	}
 
-	if err := runServer(cc, cfg, usage, ring); err != nil {
+	if err := runServer(reg, cfg, usage, ring); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
 	if err := usage.save(); err != nil {

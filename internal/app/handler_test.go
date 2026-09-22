@@ -9,8 +9,170 @@ import (
 	"testing"
 )
 
+func routerRegistryForTest(cmdcodeURL, zenURL string) *Registry {
+	cmdcode := NewCCGateway(NewCCClientWithPool(poolWithKeys("cc-key-a"), cmdcodeURL))
+	zen := NewZenClientWithPool(poolWithKeys("zen-key-a"), zenURL)
+	return NewRegistry(GatewayCmdcode, cmdcode, zen)
+}
+
+// GW-02 AC2 + compat: cmdcode/<id> and bare IDs route to cmdcode; the
+// upstream sees the model without prefix.
+func TestRouterRoutesCmdcodeAndBareToCmdcode(t *testing.T) {
+	for _, model := range []string{"cmdcode/deepseek-v4", "deepseek-v4"} {
+		cmdcodeHits := 0
+		cmdcode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cmdcodeHits++
+			body, _ := io.ReadAll(r.Body)
+			var ccReq struct {
+				Params struct {
+					Model string `json:"model"`
+				} `json:"params"`
+			}
+			if err := json.Unmarshal(body, &ccReq); err != nil {
+				t.Fatalf("decode cc body: %v", err)
+			}
+			if ccReq.Params.Model != "deepseek-v4" {
+				t.Fatalf("upstream model = %q, want deepseek-v4 (prefix stripped)", ccReq.Params.Model)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":1,\"outputTokens\":2,\"totalTokens\":3}}\n\ndata: [DONE]\n\n")
+		}))
+		defer cmdcode.Close()
+		zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatalf("zen must not receive cmdcode traffic (model %q)", model)
+		}))
+		defer zen.Close()
+
+		reg := routerRegistryForTest(cmdcode.URL, zen.URL)
+		usage := &UsageTracker{}
+		handler := handleChatCompletions(reg, &Config{}, usage)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("model %q: status = %d, want 200; body = %s", model, rec.Code, rec.Body.String())
+		}
+		if cmdcodeHits != 1 {
+			t.Fatalf("model %q: cmdcode upstream hits = %d, want 1", model, cmdcodeHits)
+		}
+		if got := usage.AccountUsageFor(GatewayCmdcode, accountID("cc-key-a")); got.Requests != 1 {
+			t.Fatalf("model %q: cmdcode usage = %+v, want 1 request", model, got)
+		}
+		if got := usage.AccountUsageFor(GatewayOpencode, accountID("cc-key-a")); got.Requests != 0 {
+			t.Fatalf("model %q: zen usage leaked = %+v", model, got)
+		}
+	}
+}
+
+// GW-02 AC1 + GW-03b: opencode/<id> routes to zen; the upstream sees the
+// model without prefix. Uses a chat-family model so the test pins the
+// chat lane; the responses lane translation is covered by T6.
+func TestRouterRoutesOpencodeToZen(t *testing.T) {
+	zenHits := 0
+	var zenModel string
+	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		zenHits++
+		body, _ := io.ReadAll(r.Body)
+		var chatReq struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(body, &chatReq); err != nil {
+			t.Fatalf("decode zen body: %v", err)
+		}
+		zenModel = chatReq.Model
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"text-delta\",\"text\":\"hi\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":1,\"outputTokens\":2,\"totalTokens\":3}}\n\ndata: [DONE]\n\n")
+	}))
+	defer zen.Close()
+	cmdcode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("cmdcode must not receive zen traffic")
+	}))
+	defer cmdcode.Close()
+
+	reg := routerRegistryForTest(cmdcode.URL, zen.URL)
+	usage := &UsageTracker{}
+	handler := handleChatCompletions(reg, &Config{}, usage)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if zenHits != 1 {
+		t.Fatalf("zen upstream hits = %d, want 1", zenHits)
+	}
+	if zenModel != "deepseek-v4-flash" {
+		t.Fatalf("zen upstream model = %q, want deepseek-v4-flash (prefix stripped)", zenModel)
+	}
+	if got := usage.AccountUsageFor(GatewayOpencode, accountID("zen-key-a")); got.Requests != 1 {
+		t.Fatalf("zen usage = %+v, want 1 request", got)
+	}
+	if got := usage.AccountUsageFor(GatewayCmdcode, accountID("zen-key-a")); got.Requests != 0 {
+		t.Fatalf("cmdcode usage leaked = %+v", got)
+	}
+}
+
+// GW-02 AC3: an unknown prefix answers 404 invalid_request_error without
+// touching any upstream.
+func TestRouterUnknownPrefix404(t *testing.T) {
+	cmdcode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("cmdcode must not receive unknown-prefix traffic")
+	}))
+	defer cmdcode.Close()
+	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("zen must not receive unknown-prefix traffic")
+	}))
+	defer zen.Close()
+
+	reg := routerRegistryForTest(cmdcode.URL, zen.URL)
+	handler := handleChatCompletions(reg, &Config{}, &UsageTracker{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"foo/bar","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_request_error") {
+		t.Fatalf("body = %s, want invalid_request_error", rec.Body.String())
+	}
+}
+
+// Edge case (spec.md): a gateway without accounts answers 503 no_accounts
+// with gateway: in the body.
+func TestRouterEmptyGateway503(t *testing.T) {
+	cmdcode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("cmdcode must not receive zen traffic")
+	}))
+	defer cmdcode.Close()
+	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("zen upstream must not be hit without accounts")
+	}))
+	defer zen.Close()
+
+	reg := NewRegistry(GatewayCmdcode,
+		NewCCGateway(NewCCClientWithPool(poolWithKeys("cc-key-a"), cmdcode.URL)),
+		NewZenClientWithPool(NewAccountPool(nil), zen.URL),
+	)
+	handler := handleChatCompletions(reg, &Config{}, &UsageTracker{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no_accounts") {
+		t.Fatalf("body = %s, want no_accounts", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "gateway: zen") {
+		t.Fatalf("body = %s, want gateway: zen", rec.Body.String())
+	}
+}
 func TestChatCompletionsRequiresModel(t *testing.T) {
-	handler := handleChatCompletions(&CCClient{}, &Config{}, &UsageTracker{})
+	handler := handleChatCompletions(routerRegistryForTest("http://127.0.0.1:1", "http://127.0.0.1:1"), &Config{}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 
@@ -25,7 +187,7 @@ func TestChatCompletionsRequiresModel(t *testing.T) {
 }
 
 func TestChatCompletionsRequiresMessages(t *testing.T) {
-	handler := handleChatCompletions(&CCClient{}, &Config{}, &UsageTracker{})
+	handler := handleChatCompletions(routerRegistryForTest("http://127.0.0.1:1", "http://127.0.0.1:1"), &Config{}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"deepseek/deepseek-v4-flash"}`))
 	rec := httptest.NewRecorder()
 
@@ -40,7 +202,7 @@ func TestChatCompletionsRequiresMessages(t *testing.T) {
 }
 
 func TestChatCompletionsBlocksExcludedModel(t *testing.T) {
-	handler := handleChatCompletions(&CCClient{Client: &http.Client{}}, &Config{ExcludeModels: []string{"gpt-"}}, &UsageTracker{})
+	handler := handleChatCompletions(routerRegistryForTest("http://127.0.0.1:1", "http://127.0.0.1:1"), &Config{ExcludeModels: []string{"gpt-"}}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`))
 	rec := httptest.NewRecorder()
 
@@ -58,7 +220,10 @@ func TestChatCompletionsBlocksExcludedModel(t *testing.T) {
 }
 
 func TestChatCompletionsAllowsNonExcludedModel(t *testing.T) {
-	handler := handleChatCompletions(&CCClient{Client: &http.Client{}}, &Config{ExcludeModels: []string{"gpt-"}}, &UsageTracker{})
+	handler := handleChatCompletions(NewRegistry(GatewayCmdcode,
+		NewCCGateway(&CCClient{Client: &http.Client{}, Pool: NewAccountPool(nil)}),
+		&stubGateway{name: GatewayOpencode, prefix: OpencodePrefix, pool: NewAccountPool(nil)},
+	), &Config{ExcludeModels: []string{"gpt-"}}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}]}`))
 	rec := httptest.NewRecorder()
 
@@ -74,7 +239,7 @@ func TestChatCompletionsAllowsNonExcludedModel(t *testing.T) {
 }
 
 func TestChatCompletionsBlocksProviderQualified(t *testing.T) {
-	handler := handleChatCompletions(&CCClient{Client: &http.Client{}}, &Config{ExcludeModels: []string{"gpt-"}}, &UsageTracker{})
+	handler := handleChatCompletions(routerRegistryForTest("http://127.0.0.1:1", "http://127.0.0.1:1"), &Config{ExcludeModels: []string{"gpt-"}}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"openai/gpt-4","messages":[{"role":"user","content":"hello"}]}`))
 	rec := httptest.NewRecorder()
 
@@ -100,7 +265,10 @@ func TestChatCompletionsReturnsNormalizedUpstreamRateLimit(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := handleChatCompletions(NewCCClient("test-key", upstream.URL), &Config{}, &UsageTracker{})
+	handler := handleChatCompletions(NewRegistry(GatewayCmdcode,
+		NewCCGateway(NewCCClient("test-key", upstream.URL)),
+		&stubGateway{name: GatewayOpencode, prefix: OpencodePrefix, pool: NewAccountPool(nil)},
+	), &Config{}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
 	rec := httptest.NewRecorder()
 
@@ -128,7 +296,7 @@ func TestChatCompletionsReturnsNormalizedUpstreamRateLimit(t *testing.T) {
 }
 
 func TestChatCompletionsRejectsRemoteImageURL(t *testing.T) {
-	handler := handleChatCompletions(&CCClient{}, &Config{}, &UsageTracker{})
+	handler := handleChatCompletions(routerRegistryForTest("http://127.0.0.1:1", "http://127.0.0.1:1"), &Config{}, &UsageTracker{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"test-model",
 		"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]

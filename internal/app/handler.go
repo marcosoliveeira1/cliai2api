@@ -16,7 +16,7 @@ const maxChatRequestBytes = 50 * 1024 * 1024
 
 var debugMode bool
 
-func handleChatCompletions(cc *CCClient, cfg *Config, usage *UsageTracker) http.HandlerFunc {
+func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxChatRequestBytes)
 
@@ -48,7 +48,21 @@ func handleChatCompletions(cc *CCClient, cfg *Config, usage *UsageTracker) http.
 			return
 		}
 
-		resp, acct, err := cc.Send(r.Context(), &req)
+		gatewayName, bareID, err := SplitModel(req.Model)
+		if err != nil {
+			writeError(w, 404, "invalid_request_error", fmt.Sprintf("model %q is not available", req.Model))
+			return
+		}
+		gateway := reg.Get(gatewayName)
+		if gateway == nil {
+			writeError(w, 404, "invalid_request_error", fmt.Sprintf("model %q is not available", req.Model))
+			return
+		}
+		log.Printf("[INFO] chat completions model=%q gateway=%s", req.Model, gateway.Name())
+		routed := req
+		routed.Model = bareID
+
+		resp, acct, err := gateway.Chat(r.Context(), &routed)
 		if err != nil {
 			var invalid *invalidRequestError
 			if errors.As(err, &invalid) {
@@ -57,7 +71,7 @@ func handleChatCompletions(cc *CCClient, cfg *Config, usage *UsageTracker) http.
 			}
 			var upstreamErr *upstreamAPIError
 			if errors.As(err, &upstreamErr) {
-				log.Printf("%s cc request failed: %v", colorize("[ERROR]", ansiRed), upstreamErr)
+				log.Printf("%s gateway=%s chat request failed: %v", colorize("[ERROR]", ansiRed), gateway.Name(), upstreamErr)
 				if upstreamErr.RetryAfter != "" {
 					w.Header().Set("Retry-After", upstreamErr.RetryAfter)
 				}
@@ -67,16 +81,16 @@ func handleChatCompletions(cc *CCClient, cfg *Config, usage *UsageTracker) http.
 				writeErrorWithCode(w, upstreamErr.Status, upstreamErr.Type, upstreamErr.Code, upstreamErr.Message)
 				return
 			}
-			log.Printf("%s cc request failed: %v", colorize("[ERROR]", ansiRed), err)
+			log.Printf("%s gateway=%s chat request failed: %v", colorize("[ERROR]", ansiRed), gateway.Name(), err)
 			writeError(w, http.StatusBadGateway, "server_error", "upstream error: "+err.Error())
 			return
 		}
 
 		if req.Stream {
 			includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
-			handleStreamWithOptions(w, resp, req.Model, usage.RecorderFor(acct, clientKeyIDFrom(r.Context())), cfg, includeUsage)
+			handleStreamWithOptions(w, resp, req.Model, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())), cfg, includeUsage)
 		} else {
-			handleNonStream(w, resp, req.Model, usage.RecorderFor(acct, clientKeyIDFrom(r.Context())), cfg)
+			handleNonStream(w, resp, req.Model, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())), cfg)
 		}
 		if err := usage.save(); err != nil {
 			log.Printf("%s save usage failed: %v", colorize("[ERROR]", ansiRed), err)

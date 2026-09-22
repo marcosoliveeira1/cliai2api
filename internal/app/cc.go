@@ -210,7 +210,7 @@ func (c *CCClient) Send(ctx context.Context, req *ChatRequest) (*http.Response, 
 			Status:  http.StatusServiceUnavailable,
 			Type:    "server_error",
 			Code:    "no_accounts",
-			Message: "no enabled Command Code accounts",
+			Message: "no enabled Command Code accounts (gateway: cmdcode)",
 		}
 	}
 
@@ -487,7 +487,53 @@ func isSSEFieldLine(line string) bool {
 	return false
 }
 
-// ====================== 格式转换 ======================
+// ====================== Gateway adapter ======================
+
+// CCGateway adapts CCClient to the Gateway interface without changing any
+// cmdcode behavior. QuotaService keeps using the underlying *CCClient.
+var _ Gateway = (*CCGateway)(nil)
+
+// CCGateway is the cmdcode Gateway: CCClient plus the registry contract.
+type CCGateway struct {
+	cc *CCClient
+}
+
+// NewCCGateway wraps cc for registry routing. cc must be non-nil.
+func NewCCGateway(cc *CCClient) *CCGateway {
+	return &CCGateway{cc: cc}
+}
+
+func (g *CCGateway) Name() string        { return GatewayCmdcode }
+func (g *CCGateway) ModelPrefix() string { return CmdcodePrefix }
+
+// Pool returns the wrapped client's pool, defaulting to an empty one when
+// the client was built without accounts so Chat reports 503 no_accounts.
+func (g *CCGateway) Pool() *AccountPool {
+	if g.cc.Pool == nil {
+		return NewAccountPool(nil)
+	}
+	return g.cc.Pool
+}
+
+func (g *CCGateway) BaseURL() string       { return g.cc.BaseURLValue() }
+func (g *CCGateway) SetBaseURL(url string) { g.cc.SetBaseURL(url) }
+
+// Chat strips the cmdcode/ prefix (bare IDs pass through) and delegates to
+// CCClient.Send, which owns rotation and failover.
+func (g *CCGateway) Chat(ctx context.Context, req *ChatRequest) (*http.Response, *Account, error) {
+	out := *req
+	if rest, ok := strings.CutPrefix(out.Model, CmdcodePrefix); ok {
+		out.Model = rest
+	}
+	return g.cc.Send(ctx, &out)
+}
+
+// FetchModels returns the cmdcode raw catalog (unprefixed; prefix is applied
+// at union time). It mirrors the in-memory bucket written by
+// FetchProviderModels.
+func (g *CCGateway) FetchModels() []ModelInfo {
+	return append([]ModelInfo(nil), modelCatalogs[GatewayCmdcode]...)
+}
 
 // resolveModelName 将客户端传来的 model ID 映射为 CC API 期望的格式。
 // 优先使用动态 modelCatalog（来自 /provider/v1/models），
