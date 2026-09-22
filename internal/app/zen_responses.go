@@ -1,0 +1,343 @@
+package app
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// Assumed upstream OpenAI Responses SSE shapes.
+//
+// The Responses dialect below is a principled contract, not a byte-for-byte
+// capture of the live upstream: tests in zen_responses_test.go speak exactly
+// this dialect against httptest fakes. Event identity comes from the JSON
+// `type` field, with a fallback to the SSE `event:` field when the payload
+// carries none:
+//
+//	event: response.output_text.delta
+//	data: {"type":"response.output_text.delta","delta":"<text>"}
+//
+//	event: response.completed
+//	data: {"type":"response.completed","response":{"status":"completed"}}
+//	 terminal; incomplete_details.reason maps max-tokens to "length".
+//
+//	event: response.failed / response.incomplete — terminal; failed surfaces
+//	as 502 upstream_stream_error with the event's error message.
+//
+// Unknown event types and malformed payloads are ignored; text deltas
+// accumulate. A stream that ends (EOF or [DONE]) without a terminal event is
+// 502 upstream_stream_incomplete, mirroring the chat lane semantics.
+
+type zenFamily uint8
+
+const (
+	zenFamilyChat zenFamily = iota + 1
+	zenFamilyResponses
+)
+
+var zenResponsesPrefixes = []string{"gpt-", "grok-", "muse-spark-"}
+
+var zenChatPrefixes = []string{"deepseek-", "minimax-", "glm-", "kimi-", "big-pickle"}
+
+// classifyZenFamily maps a bare (prefix-stripped) model ID to its Zen lane.
+// Matching is prefix-based and case-insensitive. Free-tier IDs always stay
+// on chat: the free lane only serves agent-shape chat streaming (issues §1),
+// already covered by shapeFreeBody + collapseStream — even when the name
+// matches a responses prefix (e.g. muse-spark-*-free). The second return
+// reports whether the family is known; unknown IDs fall back to chat
+// passthrough and the caller logs a [WARN].
+func classifyZenFamily(bareID string) (zenFamily, bool) {
+	lower := strings.ToLower(strings.TrimSpace(bareID))
+	if IsFreeModel(bareID) {
+		return zenFamilyChat, true
+	}
+	for _, p := range zenResponsesPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return zenFamilyResponses, true
+		}
+	}
+	for _, p := range zenChatPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return zenFamilyChat, true
+		}
+	}
+	return zenFamilyChat, false
+}
+
+type zenResponsesResult struct {
+	Status            string             `json:"status"`
+	IncompleteDetails *zenResponsesWhy   `json:"incomplete_details"`
+	Usage             *zenResponsesUsage `json:"usage"`
+}
+
+type zenResponsesWhy struct {
+	Reason string `json:"reason"`
+}
+
+type zenResponsesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+type zenResponsesEvent struct {
+	Type     string              `json:"type"`
+	Delta    string              `json:"delta"`
+	Text     string              `json:"text"`
+	Response *zenResponsesResult `json:"response"`
+	Error    any                 `json:"error"`
+}
+
+type zenResponsesParsed struct {
+	deltas    []string
+	finish    string
+	usage     Usage
+	haveUsage bool
+}
+
+// mapResponsesFinish converts a Responses terminal reason to an OpenAI
+// finish_reason. Empty/unknown reasons mean a clean stop; only an output cap
+// or a content filter changes the outcome.
+func mapResponsesFinish(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_output_tokens", "max_tokens", "length":
+		return "length"
+	case "content_filter":
+		return "content_filter"
+	default:
+		return "stop"
+	}
+}
+
+func zenResponsesIncompleteError(sawDone bool) *upstreamAPIError {
+	message := "upstream responses stream closed before a finish event"
+	if sawDone {
+		message = "upstream responses sent [DONE] before a finish event"
+	}
+	return &upstreamAPIError{
+		Status:  http.StatusBadGateway,
+		Type:    "server_error",
+		Code:    "upstream_stream_incomplete",
+		Message: message,
+	}
+}
+
+// parseZenResponsesEvents folds one upstream Responses SSE body into text
+// deltas plus a terminal finish. It closes the upstream body, like
+// collapseStream and parseStreamEvents do for the chat lane.
+func parseZenResponsesEvents(resp *http.Response) (*zenResponsesParsed, error) {
+	defer resp.Body.Close()
+	out := &zenResponsesParsed{}
+	var terminal bool
+	var failedMessage string
+	var sawDone bool
+	var eventName string
+	var dataLines []string
+
+	dispatch := func() {
+		payload := strings.Join(dataLines, "\n")
+		eventName, dataLines = "", nil
+		if strings.TrimSpace(payload) == "" {
+			return
+		}
+		if strings.TrimSpace(payload) == "[DONE]" {
+			sawDone = true
+			return
+		}
+		var ev zenResponsesEvent
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			return
+		}
+		evType := ev.Type
+		if evType == "" {
+			evType = eventName
+		}
+		switch evType {
+		case "response.output_text.delta":
+			text := ev.Delta
+			if text == "" {
+				text = ev.Text
+			}
+			if text != "" {
+				out.deltas = append(out.deltas, text)
+			}
+		case "response.completed", "response.incomplete":
+			terminal = true
+			reason := ""
+			if ev.Response != nil {
+				if ev.Response.IncompleteDetails != nil {
+					reason = ev.Response.IncompleteDetails.Reason
+				}
+				if reason == "" && ev.Response.Status != "" && ev.Response.Status != "completed" {
+					reason = ev.Response.Status
+				}
+			}
+			out.finish = mapResponsesFinish(reason)
+			if ev.Response != nil && ev.Response.Usage != nil {
+				out.usage = Usage{
+					PromptTokens:     ev.Response.Usage.InputTokens,
+					CompletionTokens: ev.Response.Usage.OutputTokens,
+					TotalTokens:      ev.Response.Usage.TotalTokens,
+				}
+				if out.usage.TotalTokens == 0 {
+					out.usage.TotalTokens = out.usage.PromptTokens + out.usage.CompletionTokens
+				}
+				out.haveUsage = true
+			}
+		case "response.failed":
+			terminal = true
+			failedMessage = "upstream responses request failed"
+			if ev.Error != nil {
+				failedMessage = fmt.Sprintf("upstream responses request failed: %v", ev.Error)
+			}
+		default:
+			// Unknown event types (response.created, in_progress,
+			// output_text.done, heartbeats) carry no client-visible state.
+		}
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSuffix(sc.Text(), "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			dispatch()
+			continue
+		}
+		if strings.HasPrefix(trimmed, ":") {
+			continue
+		}
+		if name, ok := strings.CutPrefix(trimmed, "event:"); ok {
+			eventName = strings.TrimSpace(name)
+			continue
+		}
+		if value, ok := strings.CutPrefix(trimmed, "data:"); ok {
+			dataLines = append(dataLines, strings.TrimSpace(value))
+			continue
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan upstream responses stream: %w", err)
+	}
+	dispatch()
+	if failedMessage != "" {
+		return nil, &upstreamAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "server_error",
+			Code:    "upstream_stream_error",
+			Message: failedMessage,
+		}
+	}
+	if !terminal {
+		return nil, zenResponsesIncompleteError(sawDone)
+	}
+	if out.finish == "" {
+		out.finish = "stop"
+	}
+	return out, nil
+}
+
+// translateZenResponsesStream renders parsed Responses output as OpenAI
+// chat.completion.chunk SSE: one content chunk per text delta, then a
+// finish_reason chunk, an optional usage chunk, and data: [DONE].
+func translateZenResponsesStream(resp *http.Response, model string) (*http.Response, error) {
+	parsed, err := parseZenResponsesEvents(resp)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	streamID := genStreamID()
+	created := time.Now().Unix()
+	role := "assistant"
+	for _, delta := range parsed.deltas {
+		chunk := ChatStreamChunk{
+			ID:      streamID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []StreamChoice{{
+				Index: 0,
+				Delta: StreamDelta{Role: role, Content: delta},
+			}},
+		}
+		role = ""
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(&buf, "data: %s\n\n", data)
+	}
+	finish := parsed.finish
+	chunk := ChatStreamChunk{
+		ID:      streamID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   model,
+		Choices: []StreamChoice{{
+			Index:        0,
+			Delta:        StreamDelta{},
+			FinishReason: &finish,
+		}},
+	}
+	data, _ := json.Marshal(chunk)
+	fmt.Fprintf(&buf, "data: %s\n\n", data)
+	if parsed.haveUsage {
+		usage := parsed.usage
+		usageChunk := ChatStreamChunk{
+			ID:      streamID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []StreamChoice{},
+			Usage:   &usage,
+		}
+		data, _ := json.Marshal(usageChunk)
+		fmt.Fprintf(&buf, "data: %s\n\n", data)
+	}
+	buf.WriteString("data: [DONE]\n\n")
+	raw := buf.Bytes()
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:          io.NopCloser(bytes.NewReader(raw)),
+		ContentLength: int64(len(raw)),
+	}, nil
+}
+
+// aggregateZenResponses folds parsed Responses output into a single
+// chat.completion JSON response for clients that asked stream:false.
+func aggregateZenResponses(resp *http.Response, model string) (*http.Response, error) {
+	parsed, err := parseZenResponsesEvents(resp)
+	if err != nil {
+		return nil, err
+	}
+	res := ChatResponse{
+		ID:      genStreamID(),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []Choice{{
+			Index:        0,
+			Message:      Message{Role: "assistant", Content: TextContent(strings.Join(parsed.deltas, ""))},
+			FinishReason: parsed.finish,
+		}},
+	}
+	if parsed.haveUsage {
+		res.Usage = parsed.usage
+	}
+	data, err := json.Marshal(&res)
+	if err != nil {
+		return nil, fmt.Errorf("marshal aggregated completion: %w", err)
+	}
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"application/json"}},
+		Body:          io.NopCloser(bytes.NewReader(data)),
+		ContentLength: int64(len(data)),
+	}, nil
+}

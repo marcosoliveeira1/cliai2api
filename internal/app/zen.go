@@ -98,6 +98,14 @@ func (z *ZenClient) Chat(ctx context.Context, req *ChatRequest) (*http.Response,
 	// prompt-cache affinity holds across keys.
 	ids := DeriveZenRequestIDs(nil)
 
+	family, known := classifyZenFamily(out.Model)
+	if !known {
+		log.Printf("[WARN] unknown zen model family %q, falling back to chat passthrough", out.Model)
+	}
+	if family == zenFamilyResponses {
+		return z.chatResponses(ctx, &out, req.Stream, body, ids)
+	}
+
 	pool := z.Pool()
 	attempts := pool.EnabledCount()
 	if attempts == 0 {
@@ -199,6 +207,101 @@ func bareModel(model string) string {
 
 func (z *ZenClient) doChat(ctx context.Context, body []byte, apiKey string, ids ZenRequestIDs) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", z.BaseURL()+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	setZenHeaders(httpReq.Header, apiKey, ids)
+
+	resp, err := z.Client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		resp.Body.Close()
+		return nil, normalizeUpstreamError(resp.StatusCode, errBody, resp.Header)
+	}
+	return resp, nil
+}
+
+// chatResponses runs the responses lane: POST {base}/v1/responses with
+// failover, then translates the SSE into OpenAI chunks (stream) or folds it
+// into chat.completion JSON (non-stream). Translation happens after failover
+// so a 502 incomplete never rotates keys.
+func (z *ZenClient) chatResponses(ctx context.Context, out *ChatRequest, wantStream bool, body []byte, ids ZenRequestIDs) (*http.Response, *Account, error) {
+	pool := z.Pool()
+	attempts := pool.EnabledCount()
+	if attempts == 0 {
+		return nil, nil, &upstreamAPIError{
+			Status:  http.StatusServiceUnavailable,
+			Type:    "server_error",
+			Code:    "no_accounts",
+			Message: "no enabled zen accounts (gateway: zen)",
+		}
+	}
+
+	model := out.Model
+	var lastErr error
+	var lastAcct *Account
+	for attempt := 0; attempt < attempts; attempt++ {
+		acct := pool.Acquire()
+		if acct == nil {
+			break
+		}
+		lastAcct = acct
+		resp, err := z.doResponses(ctx, body, acct.APIKey, ids)
+		if err == nil {
+			acct.RecordSuccess()
+			if wantStream {
+				translated, terr := translateZenResponsesStream(resp, model)
+				if terr != nil {
+					return nil, acct, terr
+				}
+				return translated, acct, nil
+			}
+			aggregated, aerr := aggregateZenResponses(resp, model)
+			if aerr != nil {
+				return nil, acct, aerr
+			}
+			return aggregated, acct, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, acct, err
+		}
+		if isNonRetryableClientResponse(err) {
+			var apiErr *upstreamAPIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusPaymentRequired {
+				acct.RecordSuccess()
+			}
+			return nil, acct, err
+		}
+		acct.RecordFailure(err)
+		lastErr = err
+		log.Printf("[WARN] account %s request failed, failing over: %v", acct.Name, err)
+	}
+	if lastErr != nil {
+		return nil, lastAcct, lastErr
+	}
+
+	wait := pool.EarliestRateLimitWait(time.Now()).Round(time.Second)
+	retryAfter := ""
+	message := "all zen accounts are rate limited (gateway: zen)"
+	if wait > 0 {
+		retryAfter = strconv.FormatInt(int64(wait.Seconds()), 10)
+		message += fmt.Sprintf("; next account available in %s", wait)
+	}
+	return nil, nil, &upstreamAPIError{
+		Status:     http.StatusTooManyRequests,
+		Type:       "rate_limit_error",
+		Code:       "rate_limit_exceeded",
+		Message:    message,
+		RetryAfter: retryAfter,
+	}
+}
+
+func (z *ZenClient) doResponses(ctx context.Context, body []byte, apiKey string, ids ZenRequestIDs) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", z.BaseURL()+"/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
