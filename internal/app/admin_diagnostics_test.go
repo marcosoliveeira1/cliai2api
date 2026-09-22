@@ -151,7 +151,15 @@ func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
 	if cmdcode["id"] != id {
 		t.Fatalf("shared key IDs differ: zen=%s cmdcode=%v", id, cmdcode["id"])
 	}
-	resp, _ := adminRequest(t, srv, "PATCH", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", map[string]any{"enabled": false})
+	if status, _ := debugInference(t, srv, map[string]any{"account_id": id, "model": "deepseek-v4-flash"}); status != http.StatusConflict {
+		t.Fatalf("ambiguous diagnostic status = %d, want 409", status)
+	}
+	resp, _ := adminRequest(t, srv, "POST", "/admin/api/quotas/refresh", "admin-pass-123", map[string]any{"id": id})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("ambiguous quota refresh status = %d, want 409", resp.StatusCode)
+	}
+
+	resp, _ = adminRequest(t, srv, "PATCH", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", map[string]any{"enabled": false})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("disable zen status = %d, want 200", resp.StatusCode)
 	}

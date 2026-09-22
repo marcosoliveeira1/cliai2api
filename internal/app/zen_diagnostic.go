@@ -160,6 +160,10 @@ func handleAdminDebugInference(pool *AccountPool, zenPool *AccountPool, cc *CCCl
 		}
 		gateway, ok := normalizeAdminGateway(body.Gateway)
 		if body.Gateway == "" {
+			if pool != nil && zenPool != nil && pool.Get(body.AccountID) != nil && zenPool.Get(body.AccountID) != nil {
+				writeAdminError(w, r, http.StatusConflict, "gateway is required when the same key exists in multiple gateways")
+				return
+			}
 			gateway, ok = gwNameFromAccount(pool, zenPool, body.AccountID)
 		}
 		if !ok {

@@ -523,13 +523,28 @@ func handleAdminQuotaRefreshAll(pool *AccountPool, zenPool *AccountPool, usage *
 			return
 		}
 		var body struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Gateway string `json:"gateway"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
 		}
 		if body.ID != "" {
-			_, acct, _ := adminPoolsForID(pool, zenPool, body.ID)
+			var acct *Account
+			if body.Gateway != "" {
+				gateway, ok := normalizeAdminGateway(body.Gateway)
+				if !ok {
+					writeAdminError(w, r, 400, "unknown gateway")
+					return
+				}
+				acct, _ = adminPoolForGateway(pool, zenPool, gateway, body.ID)
+			} else {
+				if pool != nil && zenPool != nil && pool.Get(body.ID) != nil && zenPool.Get(body.ID) != nil {
+					writeAdminError(w, r, http.StatusConflict, "gateway is required when the same key exists in multiple gateways")
+					return
+				}
+				_, acct, _ = adminPoolsForID(pool, zenPool, body.ID)
+			}
 			if acct == nil {
 				writeAdminError(w, r, 404, "account not found")
 				return
