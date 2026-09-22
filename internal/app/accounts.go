@@ -38,6 +38,26 @@ func newAccount(name, apiKey string, enabled bool) *Account {
 	return &Account{ID: accountID(apiKey), Name: name, APIKey: apiKey, Enabled: enabled}
 }
 
+// cloneAccount creates a stable replacement for admin mutations. Requests may
+// still hold the previous account pointer after the pool lock is released.
+func cloneAccount(a *Account) *Account {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	clone := &Account{
+		ID:               a.ID,
+		Name:             a.Name,
+		APIKey:           a.APIKey,
+		Enabled:          a.Enabled,
+		lastError:        a.lastError,
+		lastErrorAt:      a.lastErrorAt,
+		lastUsedAt:       a.lastUsedAt,
+		rateLimitedUntil: a.rateLimitedUntil,
+		authFailures:     a.authFailures,
+	}
+	clone.Errors.Store(a.Errors.Load())
+	return clone
+}
+
 // accountID derives a stable identifier from the key so stats survive renames
 // and the raw key never has to appear in persisted data or URLs.
 func accountID(apiKey string) string {
@@ -254,11 +274,14 @@ func (p *AccountPool) Add(name, apiKey string, enabled bool) (*Account, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("api_key is required")
 	}
-	if id := accountID(apiKey); p.Get(id) != nil {
-		return nil, errDuplicateAccount
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	id := accountID(apiKey)
+	for _, account := range p.accounts {
+		if account.ID == id {
+			return nil, errDuplicateAccount
+		}
+	}
 	account := newAccount(name, apiKey, enabled)
 	p.accounts = append(p.accounts, account)
 	return account, nil
@@ -279,9 +302,11 @@ func (p *AccountPool) Remove(id string) bool {
 func (p *AccountPool) SetEnabled(id string, enabled bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, a := range p.accounts {
+	for i, a := range p.accounts {
 		if a.ID == id {
-			a.Enabled = enabled
+			updated := cloneAccount(a)
+			updated.Enabled = enabled
+			p.accounts[i] = updated
 			return true
 		}
 	}
@@ -291,9 +316,11 @@ func (p *AccountPool) SetEnabled(id string, enabled bool) bool {
 func (p *AccountPool) Rename(id, name string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, a := range p.accounts {
+	for i, a := range p.accounts {
 		if a.ID == id {
-			a.Name = name
+			updated := cloneAccount(a)
+			updated.Name = name
+			p.accounts[i] = updated
 			return true
 		}
 	}
@@ -327,10 +354,15 @@ func (p *AccountPool) SetKey(id, newKey string) (string, error) {
 			return "", errDuplicateAccount
 		}
 	}
-	a.mu.Lock()
-	a.APIKey = newKey
-	a.ID = newID
-	a.mu.Unlock()
+	updated := cloneAccount(a)
+	updated.APIKey = newKey
+	updated.ID = newID
+	for i, account := range p.accounts {
+		if account == a {
+			p.accounts[i] = updated
+			break
+		}
+	}
 	return newID, nil
 }
 

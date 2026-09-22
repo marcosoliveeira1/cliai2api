@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,6 +96,51 @@ func TestAccountPoolMutationIsSafeWithRoutingReads(t *testing.T) {
 	view := pool.Views()[0]
 	if !view.Enabled || view.Name != "final" {
 		t.Fatalf("final account view = %+v", view)
+	}
+}
+
+func TestAccountPoolKeyMutationKeepsInFlightAccountStable(t *testing.T) {
+	pool := poolWithKeys("key-a")
+	inFlight := pool.Acquire()
+	if inFlight == nil {
+		t.Fatal("Acquire() = nil")
+	}
+	updated := make(chan struct{})
+	go func() {
+		if _, err := pool.SetKey(inFlight.ID, "key-b"); err != nil {
+			t.Errorf("SetKey: %v", err)
+		}
+		close(updated)
+	}()
+	for i := 0; i < 1_000; i++ {
+		if inFlight.ID != accountID("key-a") || inFlight.APIKey != "key-a" {
+			t.Fatalf("in-flight account changed: %+v", inFlight)
+		}
+	}
+	<-updated
+	if current := pool.Get(accountID("key-b")); current == nil || current.APIKey != "key-b" {
+		t.Fatalf("updated account = %+v", current)
+	}
+}
+
+func TestAccountPoolConcurrentDuplicateAdd(t *testing.T) {
+	pool := NewAccountPool(nil)
+	var wg sync.WaitGroup
+	var successes atomic.Int64
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := pool.Add("same", "shared-key", true); err == nil {
+				successes.Add(1)
+			} else if !errors.Is(err, errDuplicateAccount) {
+				t.Errorf("Add: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := successes.Load(); got != 1 || pool.Len() != 1 {
+		t.Fatalf("successful adds = %d, pool length = %d, want 1/1", got, pool.Len())
 	}
 }
 
