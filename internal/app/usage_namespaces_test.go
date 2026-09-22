@@ -25,6 +25,9 @@ func TestUsageCountersIsolatedByGateway(t *testing.T) {
 	if zen.Requests != 1 || zen.PromptTokens != 1 || zen.CompletionTokens != 2 || zen.CacheReadTokens != 3 || zen.CacheWriteTokens != 4 {
 		t.Fatalf("opencode usage = %+v", zen)
 	}
+	if got := usage.AccountUsageFor(GatewayZen, acct.ID); got != zen {
+		t.Fatalf("zen usage = %+v, want %+v", got, zen)
+	}
 	if got := usage.AccountUsage(acct.ID); got != cc {
 		t.Fatalf("legacy AccountUsage = %+v, want cmdcode %+v", got, cc)
 	}
@@ -34,6 +37,25 @@ func TestUsageCountersIsolatedByGateway(t *testing.T) {
 	}
 	if snap.TotalRequests != 4 || snap.PromptTokens != 111 || snap.CompletionTokens != 122 {
 		t.Fatalf("totals = %+v", snap)
+	}
+}
+
+func TestUsageMigratesOpencodeNamespaceToZen(t *testing.T) {
+	dir := t.TempDir()
+	oldFile := usageFile
+	usageFile = filepath.Join(dir, "usage.json")
+	t.Cleanup(func() { usageFile = oldFile })
+	data := `{"accounts":{"opencode:a12345678":{"requests":1,"prompt_tokens":2,"completion_tokens":3,"cache_read_tokens":0,"cache_write_tokens":0}}}`
+	if err := os.WriteFile(usageFile, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := loadUsage()
+	if got := loaded.AccountUsageFor(GatewayZen, "a12345678"); got.Requests != 1 || got.PromptTokens != 2 || got.CompletionTokens != 3 {
+		t.Fatalf("zen usage = %+v", got)
+	}
+	if _, ok := loaded.Snapshot().Accounts["opencode:a12345678"]; ok {
+		t.Fatalf("legacy opencode namespace was retained: %+v", loaded.Snapshot().Accounts)
 	}
 }
 

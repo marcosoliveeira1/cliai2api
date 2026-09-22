@@ -228,11 +228,17 @@ func (u *UsageTracker) accountKeyFor(gateway, id string) string {
 	if id == "" {
 		return ""
 	}
-	if _, current := usageNamespaceSplit(id); current != id {
+	if namespace, current := usageNamespaceSplit(id); current != id {
+		if namespace == GatewayOpencode {
+			return usageNamespaceKey(GatewayZen, current)
+		}
 		return id
 	}
 	if gateway == "" {
 		gateway = GatewayCmdcode
+	}
+	if gateway == GatewayOpencode {
+		gateway = GatewayZen
 	}
 	return usageNamespaceKey(gateway, id)
 }
