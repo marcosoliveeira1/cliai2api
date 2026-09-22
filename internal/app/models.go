@@ -108,7 +108,7 @@ func FetchProviderModels(baseURL, apiKey string) {
 // changes. Failed fetches keep the last successful catalog; no enabled account
 // clears only that gateway's contribution.
 func refreshGatewayCatalog(gateway string, cfg *Config, pool *AccountPool) {
-	if pool == nil || pool.Primary() == nil {
+	if pool == nil || pool.EnabledCount() == 0 {
 		catalogGateway := gateway
 		if gateway == GatewayZen {
 			catalogGateway = GatewayOpencode

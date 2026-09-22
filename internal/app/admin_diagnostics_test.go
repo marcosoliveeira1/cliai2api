@@ -151,8 +151,15 @@ func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
 	if cmdcode["id"] != id {
 		t.Fatalf("shared key IDs differ: zen=%s cmdcode=%v", id, cmdcode["id"])
 	}
+	resp, _ := adminRequest(t, srv, "PATCH", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", map[string]any{"enabled": false})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("disable zen status = %d, want 200", resp.StatusCode)
+	}
+	if got := modelIDs(ModelList{Data: modelCatalogSnapshot()}); got[OpencodePrefix+"deepseek-v4-flash"] {
+		t.Fatalf("catalog = %v, want Zen catalog cleared after last account disable", got)
+	}
 
-	resp, _ := adminRequest(t, srv, "DELETE", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", nil)
+	resp, _ = adminRequest(t, srv, "DELETE", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("delete zen status = %d, want 200", resp.StatusCode)
 	}
