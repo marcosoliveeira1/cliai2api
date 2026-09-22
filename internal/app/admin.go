@@ -402,7 +402,9 @@ func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config,
 		}
 		// The first quota query runs in the background so adding an account
 		// stays fast; the UI picks the snapshot up on its next poll.
-		quotas.RefreshAsync(acct)
+		if gateway == GatewayCmdcode && quotas != nil {
+			quotas.RefreshAsync(acct)
+		}
 		log.Printf("account %q added via webui (gateway=%s)", acct.Name, gateway)
 		writeAdminJSON(w, 201, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: usage.Quota(acct.ID)})
 	}
@@ -461,7 +463,7 @@ func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Confi
 			refreshGatewayCatalog(gateway, cfg, target)
 		}
 		acct := target.Get(id)
-		if keyChanged && quotas != nil {
+		if keyChanged && gateway == GatewayCmdcode && quotas != nil {
 			quotas.RefreshAsync(acct)
 		}
 		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, id), Gateway: gateway, Quota: usage.Quota(id)})
@@ -503,6 +505,10 @@ func handleAdminAccountQuotaRefresh(pool *AccountPool, zenPool *AccountPool, usa
 			writeAdminError(w, r, 404, "account not found")
 			return
 		}
+		if gateway == GatewayZen {
+			writeAdminError(w, r, http.StatusNotImplemented, "quota refresh is unavailable for zen")
+			return
+		}
 		if quotas == nil {
 			writeAdminError(w, r, http.StatusServiceUnavailable, "quota service unavailable")
 			return
@@ -531,8 +537,10 @@ func handleAdminQuotaRefreshAll(pool *AccountPool, zenPool *AccountPool, usage *
 		}
 		if body.ID != "" {
 			var acct *Account
+			gateway := GatewayCmdcode
 			if body.Gateway != "" {
-				gateway, ok := normalizeAdminGateway(body.Gateway)
+				var ok bool
+				gateway, ok = normalizeAdminGateway(body.Gateway)
 				if !ok {
 					writeAdminError(w, r, 400, "unknown gateway")
 					return
@@ -543,10 +551,14 @@ func handleAdminQuotaRefreshAll(pool *AccountPool, zenPool *AccountPool, usage *
 					writeAdminError(w, r, http.StatusConflict, "gateway is required when the same key exists in multiple gateways")
 					return
 				}
-				_, acct, _ = adminPoolsForID(pool, zenPool, body.ID)
+				gateway, acct, _ = adminPoolsForID(pool, zenPool, body.ID)
 			}
 			if acct == nil {
 				writeAdminError(w, r, 404, "account not found")
+				return
+			}
+			if gateway == GatewayZen {
+				writeAdminError(w, r, http.StatusNotImplemented, "quota refresh is unavailable for zen")
 				return
 			}
 			quotas.RefreshAccount(r.Context(), acct)

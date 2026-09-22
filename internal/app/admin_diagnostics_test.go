@@ -158,6 +158,10 @@ func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("ambiguous quota refresh status = %d, want 409", resp.StatusCode)
 	}
+	resp, _ = adminRequest(t, srv, "POST", "/admin/api/accounts/"+id+"/quota/refresh?gateway=zen", "admin-pass-123", nil)
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("zen quota refresh status = %d, want 501", resp.StatusCode)
+	}
 
 	resp, _ = adminRequest(t, srv, "PATCH", "/admin/api/accounts/"+id+"?gateway=zen", "admin-pass-123", map[string]any{"enabled": false})
 	if resp.StatusCode != http.StatusOK {
