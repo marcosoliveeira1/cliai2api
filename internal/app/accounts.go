@@ -395,12 +395,23 @@ func (p *AccountPool) Config() []AccountConfig {
 	return list
 }
 
-// SyncToConfig copies the pool state into cfg so a subsequent saveConfig
-// persists it. The legacy single-key field is cleared whenever accounts exist
-// so a deleted account cannot resurrect from the stale field.
+// SyncToConfig copies the cmdcode pool into the gateway source of truth and
+// refreshes the legacy compatibility mirror for existing callers.
 func (p *AccountPool) SyncToConfig(cfg *Config) {
-	cfg.CommandCode.Accounts = p.Config()
-	if len(cfg.CommandCode.Accounts) > 0 {
-		cfg.CommandCode.APIKey = ""
+	accounts := p.Config()
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	if cfg.Gateways == nil {
+		cfg.Gateways = map[string]*GatewayConfig{}
 	}
+	gc := cfg.Gateways[GatewayCmdcode]
+	if gc == nil {
+		gc = &GatewayConfig{}
+		cfg.Gateways[GatewayCmdcode] = gc
+	}
+	gc.Accounts = accounts
+	if len(accounts) > 0 {
+		gc.APIKey = ""
+	}
+	cfg.mirrorCmdcodeLocked()
 }

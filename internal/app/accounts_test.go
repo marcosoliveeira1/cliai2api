@@ -97,6 +97,9 @@ func TestAccountPoolConfigRoundTrip(t *testing.T) {
 
 	cfg := &Config{}
 	pool.SyncToConfig(cfg)
+	if got := cfg.Gateways[GatewayCmdcode]; got == nil || len(got.Accounts) != 2 {
+		t.Fatalf("gateways.cmdcode = %+v, want 2 accounts", got)
+	}
 	if len(cfg.CommandCode.Accounts) != 2 {
 		t.Fatalf("accounts = %d, want 2", len(cfg.CommandCode.Accounts))
 	}
@@ -110,6 +113,31 @@ func TestAccountPoolConfigRoundTrip(t *testing.T) {
 	reloaded := NewAccountPool(cfg.CommandCode.Accounts)
 	if reloaded.Len() != 2 || reloaded.EnabledCount() != 1 {
 		t.Fatalf("reloaded pool = %d/%d, want 2/1", reloaded.Len(), reloaded.EnabledCount())
+	}
+}
+
+func TestAccountPoolSyncPersistsGatewayAccounts(t *testing.T) {
+	path := writeTempConfig(t, "gateways:\n  cmdcode:\n    base_url: https://api.commandcode.ai\n    accounts:\n    - name: old\n      api_key: old-key\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := NewAccountPool(cfg.CommandCode.Accounts)
+	if _, err := pool.SetKey(accountID("old-key"), "new-key"); err != nil {
+		t.Fatal(err)
+	}
+	pool.SyncToConfig(cfg)
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := reloaded.Gateways[GatewayCmdcode].Accounts
+	if len(accounts) != 1 || accounts[0].APIKey != "new-key" {
+		t.Fatalf("persisted cmdcode accounts = %+v, want updated key", accounts)
 	}
 }
 
