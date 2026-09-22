@@ -181,6 +181,13 @@ func runServer(reg *Registry, cfg *Config, usage *UsageTracker, ring *logRing) e
 	if cc == nil {
 		cc = NewCCClientWithPool(pool, cfg.UpstreamBaseURL())
 	}
+	var zenPool *AccountPool
+	if zenGw := reg.Get(GatewayOpencode); zenGw != nil {
+		zenPool = zenGw.Pool()
+	}
+	if zenPool == nil {
+		zenPool = NewAccountPool(nil)
+	}
 	keys := NewClientKeyPool(cfg.APIKeys)
 	quotas := NewQuotaService(cc, pool, usage)
 
@@ -199,7 +206,7 @@ func runServer(reg *Registry, cfg *Config, usage *UsageTracker, ring *logRing) e
 
 	// WebUI：管理 API 与内嵌的单文件界面，挂在 /webui 下，根路径留给 API。
 	adminMux := http.NewServeMux()
-	registerAdminRoutes(adminMux, cc, pool, keys, cfg, usage, ring, quotas)
+	registerAdminRoutes(adminMux, cc, pool, keys, cfg, usage, ring, quotas, zenPool)
 	if cfg.WebUIEnabled() {
 		mux.Handle("/admin/", adminAuth(cfg, nil)(adminMux))
 		// Command Code 页面回传凭据的公开端点（靠 state 校验，非管理密码）。
