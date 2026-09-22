@@ -7,11 +7,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /out/cmdcode2api ./cmd/cmdcode2api
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /out/cliai2api ./cmd/cliai2api
 
 FROM alpine:3
 RUN apk add --no-cache ca-certificates tzdata
-COPY --from=build /out/cmdcode2api /usr/local/bin/cmdcode2api
+COPY --from=build /out/cliai2api /usr/local/bin/cliai2api
 
 # config.yaml and usage.json live in /data — mount a volume there so both
 # survive container replacement.
@@ -21,5 +21,5 @@ EXPOSE 11434
 
 # --host 0.0.0.0 makes the gateway reachable from outside the container;
 # flags override config.yaml, so no config edit is needed.
-ENTRYPOINT ["cmdcode2api"]
+ENTRYPOINT ["cliai2api"]
 CMD ["--host", "0.0.0.0"]

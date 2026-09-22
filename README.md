@@ -23,8 +23,8 @@
 ## Quick start
 
 ```bash
-go build -o cmdcode2api ./cmd/cmdcode2api
-./cmdcode2api
+go build -o cliai2api ./cmd/cliai2api
+./cliai2api
 ```
 
 The first start writes `config.yaml` in the working directory and prints the generated client key and WebUI admin password once. Add a Command Code account (next section), then point any OpenAI client at the gateway:
@@ -72,7 +72,7 @@ The Accounts tab can also run the OAuth flow. It uses the server's local `127.0.
 ### CLI OAuth
 
 ```bash
-./cmdcode2api --oauth
+./cliai2api --oauth
 ```
 
 The OAuth callback server always binds to `127.0.0.1:5959-5968` on the machine running the binary. Each successful flow appends one account to `config.yaml`; run `--oauth` again (e.g. with a different browser profile) to add more accounts, and re-authorizing an existing key is a no-op.
@@ -86,7 +86,7 @@ The OAuth callback server always binds to `127.0.0.1:5959-5968` on the machine r
 ssh -L 5959:127.0.0.1:5959 user@server
 
 # server
-./cmdcode2api --oauth --oauth-callback http://localhost:5959/callback
+./cliai2api --oauth --oauth-callback http://localhost:5959/callback
 ```
 
 ### Inside a container
@@ -162,6 +162,38 @@ Fields:
 - `exclude_models` — model ID prefixes hidden from `/v1/models` and rejected by `/v1/chat/completions`. Maintained from the WebUI's Models tab, where the upstream catalog is shown with checkboxes.
 
 New configs exclude `gpt-`, `claude-`, and `gemini-` by default. These prefixes match both plain model IDs such as `gpt-4` and provider-qualified IDs such as `openai/gpt-4` by checking the part after the final `/`. To make all models available, remove the entries or set `exclude_models: []`.
+
+## Gateways
+
+`cliai2api` serves two OpenAI-compatible upstreams behind one binary (extensible to N):
+
+| Gateway | Model prefix | Upstream chat endpoint | Auth |
+| --- | --- | --- | --- |
+| `cmdcode` | `cmdcode/<id>` (bare IDs also route here for legacy compat) | `POST {base_url}/alpha/generate` | Command Code API key (paste or `--oauth`) |
+| `zen` (OpenCode Zen) | `opencode/<id>` | `POST {base_url}/v1/chat/completions` or `/v1/responses` by model family | Zen API key (paste in the WebUI Accounts tab with `gateway: zen`) |
+
+- Routing is by model prefix; the prefix is stripped before the upstream call. Unknown prefixes (e.g. `foo/bar`) return `404 invalid_request_error`. A gateway with no enabled accounts returns `503 no_accounts` with the gateway name in the error body.
+- `GET /v1/models` returns the union of both catalogs with prefixes applied (`cmdcode/<id>` + `opencode/<id>`); `exclude_models` still matches the suffix after the final `/`, so `gpt-` hides `opencode/gpt-5.5`.
+- Zen supports N keys with the same round-robin + failover semantics as cmdcode (`401`/`403`/`429`/5xx rotate, `429` cools down per `Retry-After`; other 4xx end the attempt without rotating). Free-tier models (`*-free`) get agent-shape rewriting + canonical `ses_…` session headers automatically; `stream: false` collapses the upstream SSE back to JSON.
+- Responses-family models (e.g. `opencode/gpt-5.5`) are translated from upstream `responses` SSE into OpenAI chunks; an upstream close without finish yields `502 upstream_stream_incomplete`.
+
+### Migration from `cmdcode2api`
+
+The Go module stays `cmdcode2api`; only the binary and `cmd/` dir changed (`cmdcode2api` → `cliai2api`). Old `config.yaml` files keep working: on load, `commandcode.base_url/accounts/api_key` migrates in memory to `gateways.cmdcode.*` (plus `gateways.zen.base_url: https://opencode.ai/zen` defaults), and the next save persists the new shape:
+
+```yaml
+gateways:
+  cmdcode:
+    base_url: https://api.commandcode.ai
+    accounts:
+      - name: main
+        api_key: your-command-code-api-key
+  zen:
+    base_url: https://opencode.ai/zen
+    accounts: []
+```
+
+`usage.json` counters are namespaced `gateway:accountID` (legacy entries without `:` read as `cmdcode:`). Same key in both gateways is allowed (independent pools).
 
 ## Multi-account rotation
 
@@ -311,7 +343,7 @@ Client Bearer Tokens are any key from the `api_keys` list in `config.yaml`.
 ## Project layout
 
 ```text
-cmd/cmdcode2api/   CLI entrypoint
+cmd/cliai2api/      CLI entrypoint
 internal/app/      gateway implementation
 internal/web/      embedded single-file WebUI (index.html)
 ```

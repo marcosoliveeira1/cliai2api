@@ -25,7 +25,7 @@ func Run() {
 	flag.Parse()
 
 	if *version {
-		fmt.Printf("cmdcode2api %s (go %s)\n", Version, runtime.Version())
+		fmt.Printf("cliai2api %s (go %s)\n", Version, runtime.Version())
 		os.Exit(0)
 	}
 
@@ -73,7 +73,7 @@ func Run() {
 		}
 
 		fmt.Printf("\n✅ API key added as account %q in %s (%d account(s) total)\n", name, cfgPath, pool.Len())
-		fmt.Println("   You can now run cmdcode2api to start the server.")
+		fmt.Println("   You can now run cliai2api to start the server.")
 		return
 	}
 
@@ -92,15 +92,15 @@ func Run() {
 		if err := writeConfigTemplate(cfgPath, cfg2); err != nil {
 			log.Fatalf("create config failed: %v", err)
 		}
-		fmt.Printf(`cmdcode2api initialized.
+		fmt.Printf(`cliai2api initialized.
 
 Created config: %s
 Local client key: %s
 WebUI admin password: %s
 
 Next:
-  1. Run ./cmdcode2api --oauth to connect Command Code.
-  2. Run ./cmdcode2api again to start the local OpenAI-compatible API.
+  1. Run ./cliai2api --oauth to connect Command Code.
+  2. Run ./cliai2api again to start the local OpenAI-compatible API.
 
 Alternatively, just start the server — it comes up without an account, and
 you can add one in the WebUI at /webui with the admin password above.

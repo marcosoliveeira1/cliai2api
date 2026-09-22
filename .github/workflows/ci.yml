@@ -35,19 +35,19 @@ jobs:
           go-version-file: go.mod
 
       - name: Build (host)
-        run: go build -trimpath ./cmd/cmdcode2api
+        run: go build -trimpath ./cmd/cliai2api
 
       - name: Build (linux/amd64, static)
         env:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: amd64
-        run: go build -trimpath -o cmdcode2api-linux-amd64 ./cmd/cmdcode2api
+        run: go build -trimpath -o cliai2api-linux-amd64 ./cmd/cliai2api
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cmdcode2api-linux-amd64
-          path: cmdcode2api-linux-amd64
+          name: cliai2api-linux-amd64
+          path: cliai2api-linux-amd64
           retention-days: 7
 
   docker:
