@@ -12,7 +12,7 @@
 
 services:
   cmdcode2api:
-    image: ghcr.io/peach0x33a/cmdcode2api:latest
+    image: ghcr.io/marcosoliveeira1/cmdcode2api:latest
     container_name: cmdcode2api
     restart: unless-stopped
     ports:

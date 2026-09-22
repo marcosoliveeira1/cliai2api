@@ -2,6 +2,9 @@
 
 [中文说明](README.zh-CN.md)
 
+> Forked from [peach0x33a/cmdcode2api](https://github.com/peach0x33a/cmdcode2api).
+> Differences from upstream: `GET /v1/models` is public (no client Bearer token required, so OpenAI clients/tools can probe the model catalog without a key); development happens on the `main` branch (upstream uses `master`); CI publishes GHCR images on `main` pushes, `v*` tags, and manual dispatch (`ghcr.io/marcosoliveeira1/cmdcode2api` instead of `ghcr.io/peach0x33a/cmdcode2api`).
+
 `cmdcode2api` is a small OpenAI-compatible gateway for [Command Code](https://commandcode.ai/). OpenAI-style clients call the familiar `/v1/chat/completions` and `/v1/models` endpoints, and the gateway forwards requests to Command Code — rotating across multiple accounts, tracking usage, and serving a built-in admin WebUI.
 
 ## Features
@@ -12,7 +15,7 @@
 - Command Code quota dashboard: 5-hour / weekly / estimated monthly progress bars, credit balances, plan and billing period, refreshed in the background every 5 minutes
 - Embedded single-file WebUI: usage dashboard, account/key management, model exposure editor, live settings, and log tail
 - Browser OAuth helper for obtaining a Command Code API key (CLI or WebUI); each OAuth run adds an account
-- Local bearer-token auth for clients, separate admin password for the WebUI
+- Local bearer-token auth for clients (`POST /v1/chat/completions` and all other API routes; `GET /v1/models` is intentionally public in this fork), separate admin password for the WebUI
 - Usage counters (global, per-account, per-client-key) and cached quota snapshots persisted to `usage.json`
 - Base64 `image_url` conversion to Command Code image blocks; CORS enabled for local UI clients
 - `GET /health` and `GET /usage` endpoints
@@ -43,10 +46,10 @@ The server starts fine with zero accounts — the WebUI, client keys, and settin
 
 ## Docker
 
-Prebuilt multi-arch images are published to GHCR by CI on every master push (`latest`) and every `v*` tag. `config.yaml` and `usage.json` live in the `/data` volume:
+Prebuilt multi-arch images are published to GHCR by CI on every main push (`latest`) and every `v*` tag. `config.yaml` and `usage.json` live in the `/data` volume:
 
 ```bash
-docker run -d --name cmdcode2api -p 11434:11434 -v cmdcode2api-data:/data ghcr.io/peach0x33a/cmdcode2api:latest
+docker run -d --name cmdcode2api -p 11434:11434 -v cmdcode2api-data:/data ghcr.io/marcosoliveeira1/cmdcode2api:latest
 ```
 
 A ready-to-copy Compose file is provided as `docker-compose.example.yml`:
@@ -101,7 +104,7 @@ docker compose run --rm --network host cmdcode2api --oauth \
 
 # without Compose
 docker run --rm -it --network host -v cmdcode2api-data:/data \
-  ghcr.io/peach0x33a/cmdcode2api:latest --oauth
+  ghcr.io/marcosoliveeira1/cmdcode2api:latest --oauth
 ```
 
 After authorizing, the account is appended to `/data/config.yaml` automatically; run `docker compose up -d` afterwards if the gateway is still stopped.
@@ -277,7 +280,7 @@ Usage is persisted to `usage.json`, which is ignored by git. Cached quota snapsh
 
 ### `GET /v1/models`
 
-Returns the model list after applying `exclude_models` filtering, so excluded models do not appear. Each entry carries a `context_window` field when the upstream reports one.
+No authentication required (fork behavior — upstream requires a client Bearer token). Returns the model list after applying `exclude_models` filtering, so excluded models do not appear. Each entry carries a `context_window` field when the upstream reports one.
 
 ### `POST /v1/chat/completions`
 

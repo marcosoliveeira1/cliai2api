@@ -2,6 +2,9 @@
 
 [English](README.md)
 
+> 本仓库是 [peach0x33a/cmdcode2api](https://github.com/peach0x33a/cmdcode2api) 的 fork。
+> 与上游的差异：`GET /v1/models` 公开访问（无需客户端 Bearer Token，OpenAI 客户端/工具可直接探测模型列表）；开发分支为 `main`（上游为 `master`）；CI 在 `main` 推送、`v*` 标签和手动触发时发布 GHCR 镜像（`ghcr.io/marcosoliveeira1/cmdcode2api`，而非 `ghcr.io/peach0x33a/cmdcode2api`）。
+
 `cmdcode2api` 是一个 OpenAI 兼容的小型网关，面向 [Command Code](https://commandcode.ai/)。OpenAI 风格的客户端调用熟悉的 `/v1/chat/completions` 与 `/v1/models`，由网关转发到 Command Code——在多个账号间轮换、统计用量，并内置管理 WebUI。
 
 ## 功能
@@ -12,7 +15,7 @@
 - Command Code 额度仪表盘：5 小时 / 本周 / 按月估算进度条、余额、套餐与账期，后台每 5 分钟刷新
 - 内嵌单文件 WebUI：用量总览、账号/密钥管理、模型开放编辑器、在线设置、日志查看
 - 浏览器 OAuth 助手获取 Command Code API Key（CLI 或 WebUI），每次授权添加一个账号
-- 客户端 Bearer Token 鉴权，WebUI 使用独立管理密码
+- 客户端 Bearer Token 鉴权（本 fork 中 `GET /v1/models` 特意公开，其余 API 路由仍需鉴权），WebUI 使用独立管理密码
 - 用量计数（全局、按账号、按密钥）与额度快照持久化在 `usage.json`
 - base64 `image_url` 转 Command Code 图片块；为本地 UI 客户端开启 CORS
 - `GET /health` 与 `GET /usage` 端点
@@ -43,10 +46,10 @@ curl http://localhost:11434/v1/chat/completions \
 
 ## Docker
 
-CI 会在每次 master 推送（`latest` 标签）和 `v*` 标签时自动发布多架构镜像到 GHCR。`config.yaml` 和 `usage.json` 放在 `/data` 数据卷中：
+CI 会在每次 main 推送（`latest` 标签）和 `v*` 标签时自动发布多架构镜像到 GHCR。`config.yaml` 和 `usage.json` 放在 `/data` 数据卷中：
 
 ```bash
-docker run -d --name cmdcode2api -p 11434:11434 -v cmdcode2api-data:/data ghcr.io/peach0x33a/cmdcode2api:latest
+docker run -d --name cmdcode2api -p 11434:11434 -v cmdcode2api-data:/data ghcr.io/marcosoliveeira1/cmdcode2api:latest
 ```
 
 开箱即用的 Compose 文件见 `docker-compose.example.yml`：
@@ -101,7 +104,7 @@ docker compose run --rm --network host cmdcode2api --oauth \
 
 # 不用 Compose 时
 docker run --rm -it --network host -v cmdcode2api-data:/data \
-  ghcr.io/peach0x33a/cmdcode2api:latest --oauth
+  ghcr.io/marcosoliveeira1/cmdcode2api:latest --oauth
 ```
 
 授权完成后账号会自动追加到 `/data/config.yaml`；如果网关还没启动，再 `docker compose up -d` 即可。
@@ -277,7 +280,7 @@ POST   /admin/api/oauth/cancel
 
 ### `GET /v1/models`
 
-返回应用 `exclude_models` 过滤后的模型列表，被排除的模型不会出现。上游提供时，每个条目附带 `context_window` 字段（上下文窗口大小）。
+无需鉴权（本 fork 的行为——上游需要客户端 Bearer Token）。返回应用 `exclude_models` 过滤后的模型列表，被排除的模型不会出现。上游提供时，每个条目附带 `context_window` 字段（上下文窗口大小）。
 
 ### `POST /v1/chat/completions`
 
