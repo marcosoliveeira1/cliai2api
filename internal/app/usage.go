@@ -274,7 +274,9 @@ func (u *UsageTracker) DropAccountFor(gateway, id string) {
 	u.accMu.Lock()
 	defer u.accMu.Unlock()
 	delete(u.accounts, u.accountKeyFor(gateway, id))
-	delete(u.quotas, id)
+	if gateway == GatewayCmdcode {
+		delete(u.quotas, id)
+	}
 }
 
 // Quota returns the cached quota snapshot for an account, or nil. Stored

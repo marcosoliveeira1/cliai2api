@@ -59,6 +59,15 @@ func TestUsageMigratesOpencodeNamespaceToZen(t *testing.T) {
 	}
 }
 
+func TestDroppingZenAccountPreservesCmdcodeQuota(t *testing.T) {
+	usage := &UsageTracker{}
+	usage.SetQuota("a12345678", &QuotaSnapshot{Plan: &QuotaPlan{Name: "cmdcode"}})
+	usage.DropAccountFor(GatewayZen, "a12345678")
+	if got := usage.Quota("a12345678"); got == nil || got.Plan == nil || got.Plan.Name != "cmdcode" {
+		t.Fatalf("cmdcode quota after Zen removal = %+v", got)
+	}
+}
+
 func TestUsageLegacySnapshotLoadsAsCmdcode(t *testing.T) {
 	dir := t.TempDir()
 	oldFile := usageFile

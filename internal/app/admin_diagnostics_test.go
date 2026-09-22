@@ -183,6 +183,23 @@ func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
 	}
 }
 
+func TestAdminZenAccountDoesNotExposeCmdcodeQuota(t *testing.T) {
+	usage := &UsageTracker{}
+	pool := poolWithKeys("shared-key")
+	zenPool := poolWithKeys("shared-key")
+	id := accountID("shared-key")
+	usage.SetQuota(id, &QuotaSnapshot{Plan: &QuotaPlan{Name: "cmdcode"}})
+
+	zen := adminAccountViewsFor(GatewayZen, zenPool, usage, httptest.NewRequest(http.MethodGet, "/", nil))
+	if len(zen) != 1 || zen[0].Quota != nil {
+		t.Fatalf("zen accounts = %+v, want no cmdcode quota", zen)
+	}
+	cmdcode := adminAccountViewsFor(GatewayCmdcode, pool, usage, httptest.NewRequest(http.MethodGet, "/", nil))
+	if len(cmdcode) != 1 || cmdcode[0].Quota == nil || cmdcode[0].Quota.Plan == nil || cmdcode[0].Quota.Plan.Name != "cmdcode" {
+		t.Fatalf("cmdcode accounts = %+v, want quota", cmdcode)
+	}
+}
+
 // GW-06: unknown gateway is a 400, not a silent default.
 func TestAdminAccountsCreateUnknownGateway(t *testing.T) {
 	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {

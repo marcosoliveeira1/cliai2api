@@ -212,10 +212,17 @@ func adminAccountViewsFor(gateway string, pool *AccountPool, usage *UsageTracker
 			AccountView:        v,
 			UsageSnapshotEntry: usage.AccountUsageFor(gateway, v.ID),
 			Gateway:            gateway,
-			Quota:              localizeQuotaSnapshot(i18n.FromRequest(r), usage.Quota(v.ID)),
+			Quota:              localizeQuotaSnapshot(i18n.FromRequest(r), quotaForGateway(gateway, usage, v.ID)),
 		})
 	}
 	return out
+}
+
+func quotaForGateway(gateway string, usage *UsageTracker, accountID string) *QuotaSnapshot {
+	if gateway != GatewayCmdcode {
+		return nil
+	}
+	return usage.Quota(accountID)
 }
 
 func handleAdminOverview(cfg *Config, pool *AccountPool, zenPool *AccountPool, keys *ClientKeyPool, usage *UsageTracker) http.HandlerFunc {
@@ -406,7 +413,7 @@ func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config,
 			quotas.RefreshAsync(acct)
 		}
 		log.Printf("account %q added via webui (gateway=%s)", acct.Name, gateway)
-		writeAdminJSON(w, 201, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: usage.Quota(acct.ID)})
+		writeAdminJSON(w, 201, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: quotaForGateway(gateway, usage, acct.ID)})
 	}
 }
 
@@ -451,7 +458,9 @@ func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Confi
 			// The ID derives from the key; carry the usage history over, but
 			// the cached quota belongs to the old credential and is dropped.
 			usage.MoveAccountFor(gateway, id, newID)
-			usage.DropQuota(id)
+			if gateway == GatewayCmdcode {
+				usage.DropQuota(id)
+			}
 			id = newID
 			keyChanged = true
 		}
@@ -466,7 +475,7 @@ func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Confi
 		if keyChanged && gateway == GatewayCmdcode && quotas != nil {
 			quotas.RefreshAsync(acct)
 		}
-		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, id), Gateway: gateway, Quota: usage.Quota(id)})
+		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, id), Gateway: gateway, Quota: quotaForGateway(gateway, usage, id)})
 	}
 }
 
@@ -514,7 +523,7 @@ func handleAdminAccountQuotaRefresh(pool *AccountPool, zenPool *AccountPool, usa
 			return
 		}
 		quotas.RefreshAccount(r.Context(), acct)
-		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: localizeQuotaSnapshot(i18n.FromRequest(r), usage.Quota(acct.ID))})
+		writeAdminJSON(w, 200, adminAccount{AccountView: acct.View(), UsageSnapshotEntry: usage.AccountUsageFor(gateway, acct.ID), Gateway: gateway, Quota: localizeQuotaSnapshot(i18n.FromRequest(r), quotaForGateway(gateway, usage, acct.ID))})
 	}
 }
 
