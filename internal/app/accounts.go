@@ -277,21 +277,27 @@ func (p *AccountPool) Remove(id string) bool {
 }
 
 func (p *AccountPool) SetEnabled(id string, enabled bool) bool {
-	a := p.Get(id)
-	if a == nil {
-		return false
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.ID == id {
+			a.Enabled = enabled
+			return true
+		}
 	}
-	a.Enabled = enabled
-	return true
+	return false
 }
 
 func (p *AccountPool) Rename(id, name string) bool {
-	a := p.Get(id)
-	if a == nil {
-		return false
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.ID == id {
+			a.Name = name
+			return true
+		}
 	}
-	a.Name = name
-	return true
+	return false
 }
 
 // SetKey replaces an account's credential. Because IDs derive from the key,

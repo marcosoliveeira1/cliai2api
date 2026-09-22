@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -58,6 +59,42 @@ func TestAccountPoolSkipsDisabledAndRateLimited(t *testing.T) {
 		if acct == nil || acct.APIKey != "key-c" {
 			t.Fatalf("Acquire() = %v, want key-c", acct)
 		}
+	}
+}
+
+func TestAccountPoolMutationIsSafeWithRoutingReads(t *testing.T) {
+	pool := poolWithKeys("key-a")
+	id := accountID("key-a")
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				pool.Acquire()
+				pool.EnabledCount()
+				pool.Primary()
+				pool.Views()
+			}
+		}
+	}()
+	for i := 0; i < 1_000; i++ {
+		if !pool.SetEnabled(id, i%2 == 0) || !pool.Rename(id, fmt.Sprintf("name-%d", i)) {
+			t.Fatal("account mutation failed")
+		}
+	}
+	close(done)
+	readers.Wait()
+
+	pool.SetEnabled(id, true)
+	pool.Rename(id, "final")
+	view := pool.Views()[0]
+	if !view.Enabled || view.Name != "final" {
+		t.Fatalf("final account view = %+v", view)
 	}
 }
 
