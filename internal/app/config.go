@@ -85,8 +85,9 @@ type Config struct {
 	// read for legacy migration.
 	Gateways map[string]*GatewayConfig `yaml:"gateways,omitempty"`
 
-	ExcludeModels []string `yaml:"exclude_models"`
-	Debug         bool     `yaml:"-"` // runtime flag, not persisted
+	ExcludeModels  []string `yaml:"exclude_models"`
+	Debug          bool     `yaml:"-"` // runtime flag, not persisted
+	migratedLegacy bool     `yaml:"-"`
 
 	// mu guards the fields that the admin API mutates while request handlers
 	// read them (ExcludeModels, CommandCode/Gateways base URLs,
@@ -284,6 +285,7 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if migrated := cfg.promoteLegacyLocked(); migrated {
+		cfg.migratedLegacy = true
 		if _, ok := cfg.Gateways[GatewayZen]; !ok {
 			cfg.Gateways[GatewayZen] = &GatewayConfig{BaseURL: DefaultZenBaseURL}
 		}
@@ -299,6 +301,19 @@ func loadConfig(path string) (*Config, error) {
 	}
 	cfg.mirrorCmdcodeLocked()
 	return &cfg, nil
+}
+
+// persistLegacyMigration writes the gateway-form config immediately after a
+// legacy file is loaded, so migration does not depend on later admin changes.
+func persistLegacyMigration(path string, cfg *Config) error {
+	if !cfg.migratedLegacy {
+		return nil
+	}
+	if err := saveConfig(path, cfg); err != nil {
+		return err
+	}
+	cfg.migratedLegacy = false
+	return nil
 }
 
 func saveConfig(path string, cfg *Config) error {

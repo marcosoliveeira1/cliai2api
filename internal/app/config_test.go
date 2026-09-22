@@ -233,6 +233,30 @@ func TestSaveConfigPersistsGatewaysAndDropsLegacy(t *testing.T) {
 	}
 }
 
+func TestPersistLegacyMigrationWritesGatewayConfig(t *testing.T) {
+	path := writeTempConfig(t, "commandcode:\n  base_url: https://api.commandcode.ai\n  accounts:\n  - name: a\n    api_key: cc-a\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.migratedLegacy {
+		t.Fatal("legacy config was not marked for persistence")
+	}
+	if err := persistLegacyMigration(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.migratedLegacy {
+		t.Fatal("migration marker remained set after persistence")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "commandcode:") || !strings.Contains(string(data), "gateways:") {
+		t.Fatalf("persisted migration =\n%s", data)
+	}
+}
+
 func TestSaveConfigClearsMigratedGatewayAPIKey(t *testing.T) {
 	path := writeTempConfig(t, "commandcode:\n  api_key: cc-legacy\n  base_url: https://api.commandcode.ai\n")
 	cfg, err := loadConfig(path)

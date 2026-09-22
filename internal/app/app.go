@@ -109,6 +109,9 @@ Use the local client key above as the Bearer token for your OpenAI client.
 `, cfgPath, cfg2.APIKeys[0].Key, cfg2.AdminPassword)
 		os.Exit(0)
 	}
+	if err := persistLegacyMigration(cfgPath, cfg); err != nil {
+		log.Fatalf("persist config migration failed: %v", err)
+	}
 
 	// 没有上游账号也照常启动：WebUI/客户端密钥/设置均可用，
 	// chat 请求会返回 503 no_accounts，直到在 WebUI 添加账号。
