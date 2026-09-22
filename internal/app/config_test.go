@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -128,5 +129,161 @@ func TestWriteConfigTemplateDefaultExclusionLoadsActive(t *testing.T) {
 		if loaded.ExcludeModels[i] != want[i] {
 			t.Fatalf("ExcludeModels[%d] = %q, want %q", i, loaded.ExcludeModels[i], want[i])
 		}
+	}
+}
+
+func TestDefaultConfigHasGatewaySections(t *testing.T) {
+	cfg, err := defaultConfig()
+	if err != nil {
+		t.Fatalf("defaultConfig: %v", err)
+	}
+	if got := cfg.GatewayBaseURL(GatewayCmdcode); got != "https://api.commandcode.ai" {
+		t.Fatalf("cmdcode base_url = %q, want https://api.commandcode.ai", got)
+	}
+	if got := cfg.GatewayBaseURL(GatewayZen); got != "https://opencode.ai/zen" {
+		t.Fatalf("zen base_url = %q, want https://opencode.ai/zen", got)
+	}
+}
+
+func writeTempConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadConfigMigratesLegacyCommandCode(t *testing.T) {
+	path := writeTempConfig(t, "commandcode:\n  api_key: cc-legacy\n  base_url: https://api.commandcode.ai\n  accounts:\n  - name: a\n    api_key: cc-a\n  - name: b\n    api_key: cc-b\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc := cfg.Gateways[GatewayCmdcode]
+	if gc == nil {
+		t.Fatal("gateways.cmdcode missing after migration")
+	}
+	if gc.BaseURL != "https://api.commandcode.ai" {
+		t.Fatalf("migrated base_url = %q", gc.BaseURL)
+	}
+	if len(gc.Accounts) != 2 || gc.Accounts[0].APIKey != "cc-a" || gc.Accounts[1].Name != "b" {
+		t.Fatalf("migrated accounts = %+v", gc.Accounts)
+	}
+	if cfg.GatewayBaseURL(GatewayCmdcode) != "https://api.commandcode.ai" {
+		t.Fatalf("GatewayBaseURL = %q", cfg.GatewayBaseURL(GatewayCmdcode))
+	}
+	if cfg.CommandCode.BaseURL != "https://api.commandcode.ai" || len(cfg.CommandCode.Accounts) != 2 {
+		t.Fatalf("legacy mirror not kept: %+v", cfg.CommandCode)
+	}
+	zen := cfg.GatewayBaseURL(GatewayZen)
+	if zen != "https://opencode.ai/zen" {
+		t.Fatalf("zen default base_url = %q", zen)
+	}
+}
+
+func TestLoadConfigMigratesLegacySingleAPIKey(t *testing.T) {
+	path := writeTempConfig(t, "commandcode:\n  api_key: cc-legacy\n  base_url: https://api.commandcode.ai\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc := cfg.Gateways[GatewayCmdcode]
+	if gc == nil || len(gc.Accounts) != 1 {
+		t.Fatalf("migrated accounts = %+v", cfg.Gateways)
+	}
+	if gc.Accounts[0].APIKey != "cc-legacy" || gc.Accounts[0].Name != "default" {
+		t.Fatalf("migrated account = %+v", gc.Accounts[0])
+	}
+}
+
+func TestSaveConfigPersistsGatewaysAndDropsLegacy(t *testing.T) {
+	path := writeTempConfig(t, "commandcode:\n  base_url: https://api.commandcode.ai\n  accounts:\n  - name: a\n    api_key: cc-a\n  api_keys:\n  - name: default\n    key: ccgw-x\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "gateways:") {
+		t.Fatalf("saved config must contain gateways::\n%s", content)
+	}
+	if strings.Contains(content, "commandcode:") {
+		t.Fatalf("saved config must not contain legacy commandcode::\n%s", content)
+	}
+	reloaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc := reloaded.Gateways[GatewayCmdcode]
+	if gc == nil || len(gc.Accounts) != 1 || gc.Accounts[0].APIKey != "cc-a" {
+		t.Fatalf("round-trip accounts = %+v", reloaded.Gateways)
+	}
+	if gc.APIKey != "" {
+		t.Fatalf("legacy single key must be cleared on save: %+v", gc)
+	}
+	if gc.BaseURL != "https://api.commandcode.ai" {
+		t.Fatalf("round-trip base_url = %q", gc.BaseURL)
+	}
+}
+
+func TestSaveConfigClearsMigratedGatewayAPIKey(t *testing.T) {
+	path := writeTempConfig(t, "commandcode:\n  api_key: cc-legacy\n  base_url: https://api.commandcode.ai\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc := cfg.Gateways[GatewayCmdcode]
+	if gc == nil || len(gc.Accounts) != 1 || gc.Accounts[0].APIKey != "cc-legacy" {
+		t.Fatalf("migrated accounts = %+v", cfg.Gateways)
+	}
+	if gc.APIKey != "" {
+		t.Fatalf("migrated api_key field must fold into accounts: %+v", gc)
+	}
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcc := reloaded.Gateways[GatewayCmdcode]
+	if rcc == nil || len(rcc.Accounts) != 1 || rcc.Accounts[0].APIKey != "cc-legacy" || rcc.APIKey != "" {
+		t.Fatalf("round-trip = %+v", rcc)
+	}
+}
+
+func TestGatewaysRoundTrip(t *testing.T) {
+	path := writeTempConfig(t, "gateways:\n  cmdcode:\n    base_url: https://api.commandcode.ai\n    accounts:\n    - name: a\n      api_key: cc-a\n  zen:\n    base_url: https://opencode.ai/zen\n    accounts:\n    - name: z\n      api_key: zen-key\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := reloaded.Gateways[GatewayCmdcode]
+	zen := reloaded.Gateways[GatewayZen]
+	if cc == nil || len(cc.Accounts) != 1 || cc.Accounts[0].APIKey != "cc-a" {
+		t.Fatalf("cmdcode round-trip = %+v", cc)
+	}
+	if cc.BaseURL != "https://api.commandcode.ai" {
+		t.Fatalf("cmdcode base_url = %q", cc.BaseURL)
+	}
+	if zen == nil || len(zen.Accounts) != 1 || zen.Accounts[0].APIKey != "zen-key" {
+		t.Fatalf("zen round-trip = %+v", zen)
+	}
+	if zen.BaseURL != "https://opencode.ai/zen" {
+		t.Fatalf("zen base_url = %q", zen.BaseURL)
 	}
 }
