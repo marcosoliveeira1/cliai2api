@@ -86,7 +86,9 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 			return
 		}
 
-		if req.Stream {
+		if gateway.Name() == GatewayOpencode {
+			handleOpenAIResponse(w, resp, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())))
+		} else if req.Stream {
 			includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 			handleStreamWithOptions(w, resp, req.Model, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())), cfg, includeUsage)
 		} else {
@@ -96,6 +98,20 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 			log.Printf("%s save usage failed: %v", colorize("[ERROR]", ansiRed), err)
 		}
 	}
+}
+
+// handleOpenAIResponse relays Zen output, which is already OpenAI-compatible
+// JSON or SSE (including translated /v1/responses output).
+func handleOpenAIResponse(w http.ResponseWriter, resp *http.Response, usage usageRecorder) {
+	defer resp.Body.Close()
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("[ERROR] relay zen response: %v", err)
+	}
+	usage.Record(0, 0, 0, 0)
 }
 
 func handleStream(w http.ResponseWriter, resp *http.Response, model string, usage *UsageTracker, cfg *Config) {

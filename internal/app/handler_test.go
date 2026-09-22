@@ -81,8 +81,8 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 			t.Fatalf("decode zen body: %v", err)
 		}
 		zenModel = chatReq.Model
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"text-delta\",\"text\":\"hi\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":1,\"outputTokens\":2,\"totalTokens\":3}}\n\ndata: [DONE]\n\n")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"zen-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
 	}))
 	defer zen.Close()
 	cmdcode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,11 +106,43 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 	if zenModel != "deepseek-v4-flash" {
 		t.Fatalf("zen upstream model = %q, want deepseek-v4-flash (prefix stripped)", zenModel)
 	}
+	if !strings.Contains(rec.Body.String(), `"object":"chat.completion"`) || !strings.Contains(rec.Body.String(), `"content":"hi"`) {
+		t.Fatalf("response = %s, want Zen OpenAI completion", rec.Body.String())
+	}
 	if got := usage.AccountUsageFor(GatewayOpencode, accountID("zen-key-a")); got.Requests != 1 {
 		t.Fatalf("zen usage = %+v, want 1 request", got)
 	}
 	if got := usage.AccountUsageFor(GatewayCmdcode, accountID("zen-key-a")); got.Requests != 0 {
 		t.Fatalf("cmdcode usage leaked = %+v", got)
+	}
+}
+
+// GW-04 AC1: Zen's translated responses stream is already OpenAI SSE and must
+// not be interpreted as Command Code events by the public handler.
+func TestRouterRelaysZenOpenAIStream(t *testing.T) {
+	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"zen-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer zen.Close()
+	cmdcode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("cmdcode must not receive zen traffic")
+	}))
+	defer cmdcode.Close()
+
+	handler := handleChatCompletions(routerRegistryForTest(cmdcode.URL, zen.URL), &Config{}, &UsageTracker{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, `"content":"hi"`) || !strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("stream = %s, want relayed OpenAI SSE", got)
 	}
 }
 
