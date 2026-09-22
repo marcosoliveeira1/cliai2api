@@ -109,7 +109,11 @@ func FetchProviderModels(baseURL, apiKey string) {
 // clears only that gateway's contribution.
 func refreshGatewayCatalog(gateway string, cfg *Config, pool *AccountPool) {
 	if pool == nil || pool.Primary() == nil {
-		setGatewayCatalog(gateway, nil)
+		catalogGateway := gateway
+		if gateway == GatewayZen {
+			catalogGateway = GatewayOpencode
+		}
+		setGatewayCatalog(catalogGateway, nil)
 		return
 	}
 

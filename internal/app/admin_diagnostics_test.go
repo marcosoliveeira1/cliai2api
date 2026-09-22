@@ -136,9 +136,13 @@ func TestAdminAccountsCreateZenPoolAndPersist(t *testing.T) {
 
 func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
 	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			return http.StatusOK, nil, `{"object":"list","data":[{"id":"deepseek-v4-flash","object":"model"}]}`
+		}
 		return http.StatusOK, nil, `{"id":"x","object":"chat.completion","choices":[]}`
 	})
 	srv, pool, zenPool := gatewayDiscoverEnv(t, fake.srv.URL)
+	seedCatalogs(t, nil, nil)
 	_, zen := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
 		map[string]any{"name": "zen", "api_key": "shared-key", "gateway": "zen"})
 	_, cmdcode := adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
@@ -154,6 +158,9 @@ func TestAdminAccountsWithSameKeyMutateSeparately(t *testing.T) {
 	}
 	if zenPool.Get(id) != nil || pool.Get(id) == nil {
 		t.Fatalf("pools after zen delete: cmdcode=%v zen=%v", pool.Get(id), zenPool.Get(id))
+	}
+	if got := modelIDs(ModelList{Data: modelCatalogSnapshot()}); got[OpencodePrefix+"deepseek-v4-flash"] {
+		t.Fatalf("catalog = %v, want Zen catalog cleared after last account deletion", got)
 	}
 }
 

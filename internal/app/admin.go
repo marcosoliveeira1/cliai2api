@@ -457,6 +457,9 @@ func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Confi
 			writeAdminError(w, r, 500, "saving config failed: "+err.Error())
 			return
 		}
+		if body.Enabled != nil || keyChanged {
+			refreshGatewayCatalog(gateway, cfg, target)
+		}
 		acct := target.Get(id)
 		if keyChanged && quotas != nil {
 			quotas.RefreshAsync(acct)
@@ -482,6 +485,7 @@ func handleAdminAccountDelete(pool *AccountPool, zenPool *AccountPool, cfg *Conf
 			writeAdminError(w, r, 500, "saving config failed: "+err.Error())
 			return
 		}
+		refreshGatewayCatalog(gateway, cfg, target)
 		writeAdminJSON(w, 200, map[string]any{"deleted": true})
 	}
 }
