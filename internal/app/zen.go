@@ -48,7 +48,7 @@ func NewZenClientWithPool(pool *AccountPool, baseURL string) *ZenClient {
 	}
 }
 
-func (z *ZenClient) Name() string       { return GatewayOpencode }
+func (z *ZenClient) Name() string        { return GatewayOpencode }
 func (z *ZenClient) ModelPrefix() string { return OpencodePrefix }
 
 // Pool returns the account pool, defaulting to an empty one when the client
@@ -80,12 +80,15 @@ func (z *ZenClient) FetchModels() []ModelInfo { return nil }
 // opencode/ prefix stripped and the CLI identity headers from T4 injected.
 // The returned Account is the credential that produced the response or error.
 func (z *ZenClient) Chat(ctx context.Context, req *ChatRequest) (*http.Response, *Account, error) {
-	bare := req.Model
-	if rest, ok := strings.CutPrefix(bare, OpencodePrefix); ok {
-		bare = rest
-	}
 	out := *req
-	out.Model = bare
+	if rest, ok := strings.CutPrefix(out.Model, OpencodePrefix); ok {
+		out.Model = rest
+	}
+	// Free-tier lane only serves agent-shape streaming (issues §1): rewrite
+	// the body before the upstream sees it. When the client asked for
+	// stream:false, the SSE below is collapsed back into chat.completion.
+	shaped := shapeFreeBody(&out)
+	wantCollapse := shaped && !req.Stream
 	body, err := json.Marshal(&out)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal zen request: %w", err)
@@ -118,6 +121,13 @@ func (z *ZenClient) Chat(ctx context.Context, req *ChatRequest) (*http.Response,
 		resp, err := z.doChat(ctx, body, acct.APIKey, ids)
 		if err == nil {
 			acct.RecordSuccess()
+			if wantCollapse {
+				collapsed, cerr := collapseStream(resp, bareModel(req.Model))
+				if cerr != nil {
+					return nil, acct, cerr
+				}
+				return collapsed, acct, nil
+			}
 			return resp, acct, nil
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -177,6 +187,14 @@ func isNonRetryableStatus(status int) bool {
 		return false
 	}
 	return true
+}
+
+// bareModel strips the opencode/ prefix for upstream and display use.
+func bareModel(model string) string {
+	if rest, ok := strings.CutPrefix(model, OpencodePrefix); ok {
+		return rest
+	}
+	return model
 }
 
 func (z *ZenClient) doChat(ctx context.Context, body []byte, apiKey string, ids ZenRequestIDs) (*http.Response, error) {
