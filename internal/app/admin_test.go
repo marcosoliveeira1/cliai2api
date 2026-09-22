@@ -164,8 +164,7 @@ func TestAdminOverviewAndLogs(t *testing.T) {
 	pool.Add("main", "cc-key-1", true)
 	keys.Add("cli", "ccgw-key-ov", true)
 	usage.Record(1, 2, 0, 0)
-	modelCatalog = []ModelInfo{{ID: "m1", Object: "model", Created: 1700000000, OwnedBy: "commandcode"}}
-	t.Cleanup(func() { modelCatalog = nil })
+	seedCatalogs(t, []ModelInfo{{ID: "m1", Object: "model", Created: 1700000000, OwnedBy: "commandcode"}}, nil)
 
 	resp, payload := adminRequest(t, srv, "GET", "/admin/api/overview", "admin-pass-123", nil)
 	if resp.StatusCode != 200 {

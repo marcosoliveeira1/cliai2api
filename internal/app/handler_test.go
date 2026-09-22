@@ -383,16 +383,17 @@ func TestHandleStreamRejectsToolCallWhenUpstreamAborts(t *testing.T) {
 }
 
 func TestHandleModelsExcludesPrefixes(t *testing.T) {
-	oldCatalog := modelCatalog
-	t.Cleanup(func() { modelCatalog = oldCatalog })
-
-	modelCatalog = []ModelInfo{
-		{ID: "openai/gpt-4"},
-		{ID: "anthropic/claude-3"},
-		{ID: "google/gemini-1.5-pro"},
-		{ID: "deepseek/deepseek-chat"},
-	}
-	cfg := &Config{ExcludeModels: []string{"gpt-", "claude-", "gemini-"}}
+	seedCatalogs(t,
+		[]ModelInfo{
+			{ID: "gpt-4"},
+			{ID: "deepseek-chat"},
+		},
+		[]ModelInfo{
+			{ID: "gpt-5.5"},
+			{ID: "kimi-k2"},
+		},
+	)
+	cfg := &Config{ExcludeModels: []string{"gpt-"}} // suffix after "/" filters both gateways
 	handler := handleModels(cfg)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -409,22 +410,18 @@ func TestHandleModelsExcludesPrefixes(t *testing.T) {
 	if resp.Object != "list" {
 		t.Fatalf("object = %q, want list", resp.Object)
 	}
-	if len(resp.Data) != 1 {
-		t.Fatalf("len(data) = %d, want 1", len(resp.Data))
+	got := modelIDs(resp)
+	want := map[string]bool{CmdcodePrefix + "deepseek-chat": true, OpencodePrefix + "kimi-k2": true}
+	if len(resp.Data) != 2 || !got[CmdcodePrefix+"deepseek-chat"] || !got[OpencodePrefix+"kimi-k2"] {
+		t.Fatalf("data = %v, want %v", resp.Data, want)
 	}
-	if resp.Data[0].ID != "deepseek/deepseek-chat" {
-		t.Fatalf("data[0].ID = %q, want deepseek/deepseek-chat", resp.Data[0].ID)
+	if got[CmdcodePrefix+"gpt-4"] || got[OpencodePrefix+"gpt-5.5"] {
+		t.Fatalf("excluded gpt- models leaked: %v", resp.Data)
 	}
 }
 
 func TestHandleModelsNoExclusions(t *testing.T) {
-	oldCatalog := modelCatalog
-	t.Cleanup(func() { modelCatalog = oldCatalog })
-
-	modelCatalog = []ModelInfo{
-		{ID: "openai/gpt-4"},
-		{ID: "anthropic/claude-3"},
-	}
+	seedCatalogs(t, []ModelInfo{{ID: "gpt-4"}}, []ModelInfo{{ID: "kimi-k2"}})
 	cfg := &Config{}
 	handler := handleModels(cfg)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -442,16 +439,14 @@ func TestHandleModelsNoExclusions(t *testing.T) {
 	if len(resp.Data) != 2 {
 		t.Fatalf("len(data) = %d, want 2", len(resp.Data))
 	}
+	got := modelIDs(resp)
+	if !got[CmdcodePrefix+"gpt-4"] || !got[OpencodePrefix+"kimi-k2"] {
+		t.Fatalf("data = %v, want prefixed union", resp.Data)
+	}
 }
 
 func TestHandleModelsAllExcluded(t *testing.T) {
-	oldCatalog := modelCatalog
-	t.Cleanup(func() { modelCatalog = oldCatalog })
-
-	modelCatalog = []ModelInfo{
-		{ID: "openai/gpt-4"},
-		{ID: "anthropic/claude-3"},
-	}
+	seedCatalogs(t, []ModelInfo{{ID: "gpt-4"}}, []ModelInfo{{ID: "claude-x"}})
 	cfg := &Config{ExcludeModels: []string{"gpt-", "claude-"}}
 	handler := handleModels(cfg)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)

@@ -8,9 +8,42 @@ import (
 	"time"
 )
 
+// modelCatalogs holds one raw (unprefixed) catalog per gateway, keyed by
+// gateway name, so the two gateways never overwrite each other.
+// modelCatalog is the unified view served by GET /v1/models: every entry
+// carries its gateway prefix (cmdcode/<id>, opencode/<id>). It is rebuilt
+// from the buckets on every update — fetch paths never write it directly.
+var modelCatalogs = map[string][]ModelInfo{}
+
 var modelCatalog []ModelInfo
 
-// FetchProviderModels 从 CC API 拉取模型列表，填充 modelCatalog。
+// SetGatewayCatalog replaces one gateway's raw catalog and rebuilds the
+// unified prefixed view. A nil slice clears the bucket (empty contribution)
+// without touching the other gateway.
+func setGatewayCatalog(gateway string, models []ModelInfo) {
+	if modelCatalogs == nil {
+		modelCatalogs = map[string][]ModelInfo{}
+	}
+	modelCatalogs[gateway] = append([]ModelInfo(nil), models...)
+	refreshUnifiedCatalog()
+}
+
+// refreshUnifiedCatalog rebuilds modelCatalog as the union of the per-gateway
+// buckets with the gateway prefix applied. Gateway order is fixed so the
+// listing is deterministic; a gateway without accounts contributes nothing.
+func refreshUnifiedCatalog() {
+	unified := make([]ModelInfo, 0)
+	for _, gateway := range []string{GatewayCmdcode, GatewayOpencode} {
+		for _, m := range modelCatalogs[gateway] {
+			m.ID = gateway + "/" + m.ID
+			unified = append(unified, m)
+		}
+	}
+	modelCatalog = unified
+}
+
+// FetchProviderModels 从 CC API 拉取模型列表，填充 cmdcode gateway 的 bucket。
+// 拉取失败只记 [WARN] 并保持已有 catalog，其它 gateway 不受影响。
 func FetchProviderModels(baseURL, apiKey string) {
 	url := baseURL + "/provider/v1/models"
 
@@ -50,8 +83,8 @@ func FetchProviderModels(baseURL, apiKey string) {
 			ContextWindow: m.ContextLength,
 		})
 	}
-	modelCatalog = catalog
-	log.Printf("models: %d loaded from %s", len(modelCatalog), url)
+	setGatewayCatalog(GatewayCmdcode, catalog)
+	log.Printf("models: %d loaded from %s", len(modelCatalogs[GatewayCmdcode]), url)
 }
 
 func availableModels() []string {

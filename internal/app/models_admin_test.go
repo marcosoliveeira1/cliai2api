@@ -7,12 +7,14 @@ import (
 
 func TestAdminModelsExposureRoundTrip(t *testing.T) {
 	srv, _, _, cfg, _, _ := newAdminTestEnv(t)
-	modelCatalog = []ModelInfo{
-		{ID: "model-a", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
-		{ID: "model-b", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
-		{ID: "vendor/model-c", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
-	}
-	t.Cleanup(func() { modelCatalog = nil })
+	seedCatalogs(t,
+		[]ModelInfo{
+			{ID: "model-a", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
+			{ID: "model-b", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
+			{ID: "vendor/model-c", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
+		},
+		nil,
+	)
 
 	// Default: everything exposed when exclude_models is empty.
 	_, payload := adminRequest(t, srv, "GET", "/admin/api/models", "admin-pass-123", nil)
@@ -24,13 +26,14 @@ func TestAdminModelsExposureRoundTrip(t *testing.T) {
 
 	// Hide model-b and model-c via the exposed list.
 	resp, payload := adminRequest(t, srv, "PUT", "/admin/api/models", "admin-pass-123",
-		map[string]any{"exposed": []string{"model-a"}})
+		map[string]any{"exposed": []string{CmdcodePrefix + "model-a"}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("put status = %d: %v", resp.StatusCode, payload)
 	}
 	got := cfg.Excludes()
-	if len(got) != 2 || got[0] != "model-b" || got[1] != "vendor/model-c" {
-		t.Fatalf("excludes = %v, want [model-b vendor/model-c]", got)
+	want := []string{CmdcodePrefix + "model-b", CmdcodePrefix + "vendor/model-c"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("excludes = %v, want %v", got, want)
 	}
 
 	// GET reflects the new exposure states.
@@ -40,7 +43,7 @@ func TestAdminModelsExposureRoundTrip(t *testing.T) {
 		entry := m.(map[string]any)
 		states[entry["id"].(string)] = entry["exposed"].(bool)
 	}
-	if !states["model-a"] || states["model-b"] || states["vendor/model-c"] {
+	if !states[CmdcodePrefix+"model-a"] || states[CmdcodePrefix+"model-b"] || states[CmdcodePrefix+"vendor/model-c"] {
 		t.Fatalf("states = %v", states)
 	}
 }
@@ -49,17 +52,19 @@ func TestAdminModelsKeepsNonCatalogPrefixes(t *testing.T) {
 	srv, _, _, cfg, _, _ := newAdminTestEnv(t)
 	cfg.SetExcludes([]string{"gpt-", "stale-"})
 
-	modelCatalog = []ModelInfo{
-		{ID: "gpt-4", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
-		{ID: "model-a", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
-	}
-	t.Cleanup(func() { modelCatalog = nil })
+	seedCatalogs(t,
+		[]ModelInfo{
+			{ID: "gpt-4", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
+			{ID: "model-a", Object: "model", Created: 1700000000, OwnedBy: "commandcode"},
+		},
+		nil,
+	)
 
 	// Expose everything from the catalog; "gpt-" materializes into the
 	// concrete catalog IDs it matches, "stale-" (matches nothing loaded) is
 	// preserved for chat-time filtering.
 	resp, _ := adminRequest(t, srv, "PUT", "/admin/api/models", "admin-pass-123",
-		map[string]any{"exposed": []string{"gpt-4", "model-a"}})
+		map[string]any{"exposed": []string{CmdcodePrefix + "gpt-4", CmdcodePrefix + "model-a"}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("put status = %d", resp.StatusCode)
 	}

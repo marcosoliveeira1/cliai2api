@@ -72,9 +72,42 @@ func (z *ZenClient) SetBaseURL(url string) {
 	z.Base = url
 }
 
-// FetchModels returns the Zen catalog without prefix; the prefix is applied
-// at union time. Catalog fetch lands in T7; until then it contributes empty.
-func (z *ZenClient) FetchModels() []ModelInfo { return nil }
+// FetchModels returns the Zen raw catalog (unprefixed; prefix is applied at
+// union time). Without an enabled account it contributes empty. Upstream
+// failures degrade to empty — the caller logs the [WARN].
+func (z *ZenClient) FetchModels() []ModelInfo {
+	pool := z.Pool()
+	primary := pool.Primary()
+	if primary == nil || !primary.Enabled {
+		return nil
+	}
+	client := z.Client
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	req, err := http.NewRequest("GET", z.BaseURL()+"/v1/models", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+primary.APIKey)
+	setZenHeaders(req.Header, primary.APIKey, DeriveZenRequestIDs(nil))
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var list struct {
+		Object string      `json:"object"`
+		Data   []ModelInfo `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil
+	}
+	return list.Data
+}
 
 // Chat posts the OpenAI body 1:1 to {base}/v1/chat/completions with the
 // opencode/ prefix stripped and the CLI identity headers from T4 injected.
