@@ -36,6 +36,12 @@ type Gateway interface {
 	FetchModels() []ModelInfo
 }
 
+// HeaderAwareGateway receives the caller headers when upstream request
+// identity (such as Zen session affinity) needs to be preserved.
+type HeaderAwareGateway interface {
+	ChatWithHeaders(ctx context.Context, req *ChatRequest, inbound http.Header) (*http.Response, *Account, error)
+}
+
 // SplitModel routes a model ID to its gateway and strips the prefix.
 // A bare ID without "/" defaults to cmdcode for legacy compatibility.
 // An empty model or an unrecognized prefix is an error.

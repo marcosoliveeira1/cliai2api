@@ -113,6 +113,12 @@ func (z *ZenClient) FetchModels() []ModelInfo {
 // opencode/ prefix stripped and the CLI identity headers from T4 injected.
 // The returned Account is the credential that produced the response or error.
 func (z *ZenClient) Chat(ctx context.Context, req *ChatRequest) (*http.Response, *Account, error) {
+	return z.ChatWithHeaders(ctx, req, nil)
+}
+
+// ChatWithHeaders preserves caller-provided Zen identity headers across
+// requests so session affinity continues across conversation turns.
+func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbound http.Header) (*http.Response, *Account, error) {
 	out := *req
 	if rest, ok := strings.CutPrefix(out.Model, OpencodePrefix); ok {
 		out.Model = rest
@@ -129,7 +135,7 @@ func (z *ZenClient) Chat(ctx context.Context, req *ChatRequest) (*http.Response,
 
 	// One session per logical request: failover retries keep the same IDs so
 	// prompt-cache affinity holds across keys.
-	ids := DeriveZenRequestIDs(nil)
+	ids := DeriveZenRequestIDs(inbound)
 
 	family, known := classifyZenFamily(out.Model)
 	if !known {

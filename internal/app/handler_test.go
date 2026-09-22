@@ -71,6 +71,7 @@ func TestRouterRoutesCmdcodeAndBareToCmdcode(t *testing.T) {
 func TestRouterRoutesOpencodeToZen(t *testing.T) {
 	zenHits := 0
 	var zenModel string
+	var zenSession string
 	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		zenHits++
 		body, _ := io.ReadAll(r.Body)
@@ -81,6 +82,7 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 			t.Fatalf("decode zen body: %v", err)
 		}
 		zenModel = chatReq.Model
+		zenSession = r.Header.Get("x-opencode-session")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"zen-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
 	}))
@@ -94,6 +96,7 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 	usage := &UsageTracker{}
 	handler := handleChatCompletions(reg, &Config{}, usage)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("x-opencode-session", "ses_client_session")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -105,6 +108,9 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 	}
 	if zenModel != "deepseek-v4-flash" {
 		t.Fatalf("zen upstream model = %q, want deepseek-v4-flash (prefix stripped)", zenModel)
+	}
+	if zenSession != "ses_client_session" {
+		t.Fatalf("zen session = %q, want caller session", zenSession)
 	}
 	if !strings.Contains(rec.Body.String(), `"object":"chat.completion"`) || !strings.Contains(rec.Body.String(), `"content":"hi"`) {
 		t.Fatalf("response = %s, want Zen OpenAI completion", rec.Body.String())

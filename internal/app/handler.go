@@ -62,7 +62,13 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 		routed := req
 		routed.Model = bareID
 
-		resp, acct, err := gateway.Chat(r.Context(), &routed)
+		var resp *http.Response
+		var acct *Account
+		if headerAware, ok := gateway.(HeaderAwareGateway); ok {
+			resp, acct, err = headerAware.ChatWithHeaders(r.Context(), &routed, r.Header)
+		} else {
+			resp, acct, err = gateway.Chat(r.Context(), &routed)
+		}
 		if err != nil {
 			var invalid *invalidRequestError
 			if errors.As(err, &invalid) {
