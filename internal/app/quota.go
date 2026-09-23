@@ -535,6 +535,14 @@ func (s *QuotaService) RefreshAccount(ctx context.Context, acct *Account) *Quota
 	}
 
 	snap, err := fetchQuotaSnapshot(ctx, s.client, s.cc.BaseURLValue(), acct.APIKey)
+	gatewayLifecycleMu.Lock()
+	defer gatewayLifecycleMu.Unlock()
+	// The fetch may have outlived an account deletion or credential rotation.
+	// Only publish it while the exact account credential is still current.
+	current := s.pool.Get(acct.ID)
+	if current == nil || current.APIKey != acct.APIKey {
+		return nil
+	}
 	now := time.Now()
 	if err != nil {
 		snap = cloneForQuotaError(s.usage.Quota(acct.ID), err.Error(), now)

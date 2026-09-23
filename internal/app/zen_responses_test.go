@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 const zenResponsesSSE = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}\n\n" +
@@ -83,6 +85,41 @@ func TestZenResponsesStreamTranslatesToOpenAIChunks(t *testing.T) {
 	}
 	if decoded.Model != "gpt-5.5" {
 		t.Fatalf("upstream model = %q, want bare id without prefix", decoded.Model)
+	}
+}
+
+func TestZenResponsesStreamRelaysBeforeNextUpstreamEvent(t *testing.T) {
+	upstream, upstreamWriter := io.Pipe()
+	release := make(chan struct{})
+	go func() {
+		_, _ = io.WriteString(upstreamWriter, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n")
+		<-release
+		_, _ = io.WriteString(upstreamWriter, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+		_ = upstreamWriter.Close()
+	}()
+	translated, err := translateZenResponsesStream(&http.Response{Body: upstream}, "gpt-5.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := translated
+	defer out.Body.Close()
+	line, err := bufio.NewReader(out.Body).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(line, `"content":"first"`) {
+		t.Fatalf("first chunk = %q", line)
+	}
+	select {
+	case <-time.After(40 * time.Millisecond):
+	}
+	close(release)
+	remaining, err := io.ReadAll(out.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(remaining), `"finish_reason":"stop"`) || !strings.HasSuffix(strings.TrimSpace(string(remaining)), "data: [DONE]") {
+		t.Fatalf("stream tail missing finish/DONE: %s", remaining)
 	}
 }
 
@@ -179,13 +216,17 @@ func TestZenResponsesIncompleteStreamIs502(t *testing.T) {
 			client := NewZenClientWithPool(poolWithKeys("zen-key-a"), fake.srv.URL)
 
 			streamReq := zenChatReq("opencode/gpt-5.5")
-			_, _, err := client.Chat(context.Background(), streamReq)
-			upstreamErr := asUpstreamErr(t, err)
-			if upstreamErr.Status != http.StatusBadGateway {
-				t.Fatalf("status = %d, want 502", upstreamErr.Status)
+			resp, _, err := client.Chat(context.Background(), streamReq)
+			if err != nil {
+				t.Fatalf("Chat returned before relaying partial stream: %v", err)
 			}
-			if upstreamErr.Code != "upstream_stream_incomplete" {
-				t.Fatalf("code = %q, want upstream_stream_incomplete", upstreamErr.Code)
+			partial, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if !strings.Contains(string(partial), `"content":"partial"`) {
+				t.Fatalf("partial chunk not relayed: %s", partial)
+			}
+			if readErr == nil {
+				t.Fatal("incomplete upstream stream should terminate with an error")
 			}
 			if n := len(fake.all()); n != 1 {
 				t.Fatalf("upstream calls = %d, want 1 (no retry after stream start)", n)

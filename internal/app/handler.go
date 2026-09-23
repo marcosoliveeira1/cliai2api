@@ -114,8 +114,25 @@ func handleOpenAIResponse(w http.ResponseWriter, resp *http.Response, usage usag
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Printf("[ERROR] relay zen response: %v", err)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				log.Printf("[ERROR] relay zen response: %v", writeErr)
+				break
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Printf("[ERROR] relay zen response: %v", err)
+			break
+		}
 	}
 	usage.Record(0, 0, 0, 0)
 }

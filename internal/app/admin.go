@@ -14,6 +14,8 @@ import (
 	"cmdcode2api/internal/i18n"
 )
 
+var gatewayLifecycleMu sync.Mutex
+
 // registerAdminRoutes wires the admin JSON API used by the WebUI. It must be
 // mounted behind adminAuth.
 //
@@ -376,6 +378,8 @@ func gwNameFromAccount(pool, zenPool *AccountPool, id string) (string, bool) {
 
 func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		gatewayLifecycleMu.Lock()
+		defer gatewayLifecycleMu.Unlock()
 		var body struct {
 			Name    string `json:"name"`
 			APIKey  string `json:"api_key"`
@@ -419,6 +423,8 @@ func handleAdminAccountAdd(pool *AccountPool, zenPool *AccountPool, cfg *Config,
 
 func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker, quotas *QuotaService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		gatewayLifecycleMu.Lock()
+		defer gatewayLifecycleMu.Unlock()
 		id := r.PathValue("id")
 		gateway, _, target, errMsg := adminPoolsForRequest(r, pool, zenPool, id)
 		if errMsg != "" {
@@ -481,6 +487,8 @@ func handleAdminAccountPatch(pool *AccountPool, zenPool *AccountPool, cfg *Confi
 
 func handleAdminAccountDelete(pool *AccountPool, zenPool *AccountPool, cfg *Config, usage *UsageTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		gatewayLifecycleMu.Lock()
+		defer gatewayLifecycleMu.Unlock()
 		id := r.PathValue("id")
 		gateway, _, target, errMsg := adminPoolsForRequest(r, pool, zenPool, id)
 		if errMsg != "" {

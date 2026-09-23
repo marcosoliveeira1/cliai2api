@@ -247,64 +247,166 @@ func parseZenResponsesEvents(resp *http.Response) (*zenResponsesParsed, error) {
 // chat.completion.chunk SSE: one content chunk per text delta, then a
 // finish_reason chunk, an optional usage chunk, and data: [DONE].
 func translateZenResponsesStream(resp *http.Response, model string) (*http.Response, error) {
-	parsed, err := parseZenResponsesEvents(resp)
-	if err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
 	streamID := genStreamID()
 	created := time.Now().Unix()
-	role := "assistant"
-	for _, delta := range parsed.deltas {
-		chunk := ChatStreamChunk{
-			ID:      streamID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
-			Choices: []StreamChoice{{
-				Index: 0,
-				Delta: StreamDelta{Role: role, Content: delta},
-			}},
+	reader, writer := io.Pipe()
+	ready := make(chan error, 1)
+	announced := false
+	go func() {
+		defer resp.Body.Close()
+		defer writer.Close()
+		role := "assistant"
+		writeChunk := func(delta string, finish *string, usage *Usage) error {
+			chunk := ChatStreamChunk{
+				ID:      streamID,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   model,
+				Choices: []StreamChoice{{
+					Index:        0,
+					Delta:        StreamDelta{Role: role, Content: delta},
+					FinishReason: finish,
+				}},
+			}
+			if usage != nil {
+				chunk.Choices = []StreamChoice{}
+				chunk.Usage = usage
+			}
+			role = ""
+			data, _ := json.Marshal(chunk)
+			if !announced && (delta != "" || finish != nil) {
+				announced = true
+				ready <- nil
+			}
+			_, err := fmt.Fprintf(writer, "data: %s\n\n", data)
+			return err
 		}
-		role = ""
-		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(&buf, "data: %s\n\n", data)
-	}
-	finish := parsed.finish
-	chunk := ChatStreamChunk{
-		ID:      streamID,
-		Object:  "chat.completion.chunk",
-		Created: created,
-		Model:   model,
-		Choices: []StreamChoice{{
-			Index:        0,
-			Delta:        StreamDelta{},
-			FinishReason: &finish,
-		}},
-	}
-	data, _ := json.Marshal(chunk)
-	fmt.Fprintf(&buf, "data: %s\n\n", data)
-	if parsed.haveUsage {
-		usage := parsed.usage
-		usageChunk := ChatStreamChunk{
-			ID:      streamID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
-			Choices: []StreamChoice{},
-			Usage:   &usage,
+		var eventName string
+		var dataLines []string
+		var terminal, sawDone, haveUsage bool
+		var failed string
+		finish := "stop"
+		var usage Usage
+		dispatch := func() error {
+			payload := strings.Join(dataLines, "\n")
+			dataLines = nil
+			if strings.TrimSpace(payload) == "" {
+				return nil
+			}
+			if strings.TrimSpace(payload) == "[DONE]" {
+				sawDone = true
+				return nil
+			}
+			var ev zenResponsesEvent
+			if json.Unmarshal([]byte(payload), &ev) != nil {
+				return nil
+			}
+			t := ev.Type
+			if t == "" {
+				t = eventName
+			}
+			eventName = ""
+			switch t {
+			case "response.output_text.delta":
+				delta := ev.Delta
+				if delta == "" {
+					delta = ev.Text
+				}
+				if delta != "" {
+					return writeChunk(delta, nil, nil)
+				}
+			case "response.completed", "response.incomplete":
+				terminal = true
+				reason := ""
+				if ev.Response != nil {
+					if ev.Response.IncompleteDetails != nil {
+						reason = ev.Response.IncompleteDetails.Reason
+					}
+					if reason == "" && ev.Response.Status != "" && ev.Response.Status != "completed" {
+						reason = ev.Response.Status
+					}
+					if ev.Response.Usage != nil {
+						usage = Usage{PromptTokens: ev.Response.Usage.InputTokens, CompletionTokens: ev.Response.Usage.OutputTokens, TotalTokens: ev.Response.Usage.TotalTokens}
+						if usage.TotalTokens == 0 {
+							usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+						}
+						haveUsage = true
+					}
+				}
+				finish = mapResponsesFinish(reason)
+			case "response.failed":
+				terminal = true
+				failed = "upstream responses request failed"
+				if ev.Error != nil {
+					failed = fmt.Sprintf("upstream responses request failed: %v", ev.Error)
+				}
+			}
+			return nil
 		}
-		data, _ := json.Marshal(usageChunk)
-		fmt.Fprintf(&buf, "data: %s\n\n", data)
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 4096), 1024*1024)
+		for sc.Scan() {
+			line := strings.TrimSuffix(sc.Text(), "\r")
+			trim := strings.TrimSpace(line)
+			if trim == "" {
+				if dispatch() != nil {
+					return
+				}
+				continue
+			}
+			if strings.HasPrefix(trim, ":") {
+				continue
+			}
+			if v, ok := strings.CutPrefix(trim, "event:"); ok {
+				eventName = strings.TrimSpace(v)
+			}
+			if v, ok := strings.CutPrefix(trim, "data:"); ok {
+				dataLines = append(dataLines, strings.TrimSpace(v))
+			}
+		}
+		if sc.Err() != nil || dispatch() != nil {
+			if !announced {
+				ready <- &upstreamAPIError{Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_stream_incomplete", Message: "upstream responses stream could not be read"}
+			}
+			return
+		}
+		if !terminal {
+			err := zenResponsesIncompleteError(sawDone)
+			if !announced {
+				ready <- err
+			}
+			_ = writer.CloseWithError(err)
+			return
+		}
+		if failed != "" {
+			err := &upstreamAPIError{Status: http.StatusBadGateway, Type: "server_error", Code: "upstream_stream_error", Message: failed}
+			if !announced {
+				ready <- err
+			}
+			_ = writer.CloseWithError(err)
+			return
+		}
+		end := finish
+		if err := writeChunk("", &end, nil); err != nil {
+			return
+		}
+		if haveUsage {
+			if err := writeChunk("", nil, &usage); err != nil {
+				return
+			}
+		}
+		_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+	}()
+	if err := <-ready; err != nil {
+		_ = reader.Close()
+		return nil, err
 	}
-	buf.WriteString("data: [DONE]\n\n")
-	raw := buf.Bytes()
 	return &http.Response{
 		Status:        "200 OK",
 		StatusCode:    http.StatusOK,
 		Header:        http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:          io.NopCloser(bytes.NewReader(raw)),
-		ContentLength: int64(len(raw)),
+		Body:          reader,
+		ContentLength: -1,
 	}, nil
 }
 

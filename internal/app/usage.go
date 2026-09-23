@@ -25,9 +25,10 @@ type UsageTracker struct {
 	// Both counter maps are guarded by accMu. Account and client-key
 	// counters are independent dimensions: an account aggregates across all
 	// client keys and vice versa.
-	accMu      sync.Mutex
-	accounts   map[string]*UsageCounters
-	clientKeys map[string]*UsageCounters
+	accMu          sync.Mutex
+	accounts       map[string]*UsageCounters
+	accountAliases map[string]string
+	clientKeys     map[string]*UsageCounters
 	// quotas caches the latest fetched quota snapshot per account ID; the
 	// entries are replaced wholesale and never mutated in place.
 	quotas map[string]*QuotaSnapshot
@@ -159,8 +160,20 @@ type mirrorUsageRecorder struct {
 
 func (r *mirrorUsageRecorder) Record(prompt, completion, cacheRead, cacheWrite int) {
 	r.tracker.Record(prompt, completion, cacheRead, cacheWrite)
-	if c := r.tracker.accountCounter(r.accountID); c != nil {
+	if r.accountID != "" {
+		r.tracker.accMu.Lock()
+		r.tracker.ensureMapsLocked()
+		id := r.accountID
+		for i := 0; i < 16 && r.tracker.accountAliases[id] != ""; i++ {
+			id = r.tracker.accountAliases[id]
+		}
+		c := r.tracker.accounts[id]
+		if c == nil {
+			c = &UsageCounters{}
+			r.tracker.accounts[id] = c
+		}
 		c.add(prompt, completion, cacheRead, cacheWrite)
+		r.tracker.accMu.Unlock()
 	}
 	if c := r.tracker.clientKeyCounter(r.clientKeyID); c != nil {
 		c.add(prompt, completion, cacheRead, cacheWrite)
@@ -341,6 +354,10 @@ func (u *UsageTracker) MoveAccountFor(gateway, oldID, newID string) {
 	u.accMu.Lock()
 	defer u.accMu.Unlock()
 	u.ensureMapsLocked()
+	if u.accountAliases == nil {
+		u.accountAliases = make(map[string]string)
+	}
+	u.accountAliases[oldKey] = newKey
 	old := u.accounts[oldKey]
 	if old == nil {
 		return
