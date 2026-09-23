@@ -89,6 +89,20 @@ func TestZenResponsesStreamTranslatesToOpenAIChunks(t *testing.T) {
 	if !decoded.Stream || len(decoded.Input) != 1 {
 		t.Fatalf("upstream Responses request = %+v, want streamed input message", decoded)
 	}
+	if decoded.Store || len(decoded.Include) != 1 || decoded.Include[0] != "reasoning.encrypted_content" || decoded.ToolChoice != "auto" {
+		t.Fatalf("Responses compatibility fields = %+v, want store:false, encrypted reasoning, tool_choice:auto", decoded)
+	}
+	if decoded.PromptCacheKey != "zen:"+calls[0].headers.Get("x-opencode-session") {
+		t.Fatalf("prompt_cache_key = %q, want session-scoped value", decoded.PromptCacheKey)
+	}
+	for _, h := range []string{"x-opencode-client", "x-opencode-project", "x-opencode-request", "x-opencode-session"} {
+		if calls[0].headers.Get(h) == "" {
+			t.Errorf("Responses upstream header %s is empty", h)
+		}
+	}
+	if calls[0].headers.Get("x-opencode-parent") != "" || calls[0].headers.Get("prompt_cache_key") != "" {
+		t.Errorf("Responses got chat-only headers: %+v", calls[0].headers)
+	}
 }
 
 func TestZenResponsesStreamRelaysBeforeNextUpstreamEvent(t *testing.T) {

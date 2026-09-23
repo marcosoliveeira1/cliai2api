@@ -168,3 +168,27 @@ func TestSetZenHeadersClientOverridePropagates(t *testing.T) {
 		t.Fatalf("x-opencode-client = %q, want %q", h.Get("x-opencode-client"), "codex")
 	}
 }
+
+func TestSetZenResponsesHeadersPreservesOpenCodeIdentity(t *testing.T) {
+	inbound := http.Header{}
+	inbound.Set("x-opencode-org-id", "wrk_example")
+	inbound.Set("x-opencode-project", "project-from-caller")
+	inbound.Set("x-opencode-session", "session-from-caller")
+	inbound.Set("x-opencode-request", "request-from-caller")
+	inbound.Set("User-Agent", "opencode/1.18.32 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14")
+	ids := DeriveZenRequestIDs(inbound)
+	h := http.Header{}
+	setZenResponsesHeaders(h, "zen-key", ids)
+	for k, want := range map[string]string{
+		"x-opencode-org-id": "wrk_example", "x-opencode-project": "project-from-caller",
+		"x-opencode-session": "session-from-caller", "x-opencode-request": "request-from-caller",
+		"User-Agent": inbound.Get("User-Agent"), "Authorization": "Bearer zen-key",
+	} {
+		if got := h.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if h.Get("x-opencode-parent") != "" || h.Get("prompt_cache_key") != "" {
+		t.Errorf("Responses headers include chat-only values: %+v", h)
+	}
+}

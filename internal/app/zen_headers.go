@@ -8,12 +8,9 @@ import (
 	"strings"
 )
 
-// zenCLIVersion is the opencode CLI release the Zen wire format below was
-// validated against. The upstream keys free-tier session checks off CLI
-// identity headers, so the gateway stays identical to the real client.
-// Last validated against opencode 1.18.31 (static reference:
-// .spec/issues.md §2; live capture was not feasible — see "Suposições
-// assinadas (T4 recon)" in .specs/features/cliai2api-gateways/context.md).
+// zenCLIVersion is the fallback User-Agent when the inbound caller does not
+// provide one. Responses requests preserve the caller's User-Agent and the
+// OpenCode identity values it sends.
 const zenCLIVersion = "1.18.31"
 
 // zenUserAgent matches the official opencode CLI.
@@ -32,10 +29,12 @@ const zenDefaultParent = "msg_system"
 // x-session-affinity and X-Session-Id so prompt-cache affinity holds.
 type ZenRequestIDs struct {
 	Client    string
+	OrgID     string
 	ProjectID string
 	SessionID string
 	RequestID string
 	ParentID  string
+	UserAgent string
 }
 
 // promptCacheKey scopes the upstream prompt cache to the session.
@@ -106,11 +105,13 @@ func firstZenHeader(inbound http.Header, names ...string) string {
 func DeriveZenRequestIDs(inbound http.Header) ZenRequestIDs {
 	ids := ZenRequestIDs{
 		Client:    zenClientName(),
+		OrgID:     firstZenHeader(inbound, "x-opencode-org-id"),
 		ProjectID: firstZenHeader(inbound, "x-opencode-project"),
 		SessionID: firstZenHeader(inbound,
 			"x-opencode-session", "x-session-affinity", "X-Session-Id", "conversation-id"),
 		RequestID: firstZenHeader(inbound, "x-opencode-request", "x-request-id"),
 		ParentID:  firstZenHeader(inbound, "x-opencode-parent"),
+		UserAgent: firstZenHeader(inbound, "User-Agent"),
 	}
 	if ids.ProjectID == "" {
 		ids.ProjectID = CanonicalProjectID()
@@ -133,6 +134,9 @@ func DeriveZenRequestIDs(inbound http.Header) ZenRequestIDs {
 func setZenHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("Authorization", "Bearer "+apiKey)
 	h.Set("x-opencode-client", ids.Client)
+	if ids.OrgID != "" {
+		h.Set("x-opencode-org-id", ids.OrgID)
+	}
 	h.Set("x-opencode-project", ids.ProjectID)
 	h.Set("x-opencode-session", ids.SessionID)
 	h.Set("x-opencode-request", ids.RequestID)
@@ -140,5 +144,29 @@ func setZenHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("x-session-affinity", ids.SessionID)
 	h.Set("X-Session-Id", ids.SessionID)
 	h.Set("prompt_cache_key", ids.promptCacheKey())
-	h.Set("User-Agent", zenUserAgent)
+	userAgent := ids.UserAgent
+	if userAgent == "" {
+		userAgent = zenUserAgent
+	}
+	h.Set("User-Agent", userAgent)
+}
+
+// setZenResponsesHeaders emits the identity headers observed on Zen Responses
+// requests. Chat-only affinity aliases and the cache key header are omitted;
+// Responses carries prompt_cache_key in its JSON body.
+func setZenResponsesHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
+	h.Set("Authorization", "Bearer "+apiKey)
+	h.Set("Content-Type", "application/json")
+	h.Set("x-opencode-client", ids.Client)
+	if ids.OrgID != "" {
+		h.Set("x-opencode-org-id", ids.OrgID)
+	}
+	h.Set("x-opencode-project", ids.ProjectID)
+	h.Set("x-opencode-request", ids.RequestID)
+	h.Set("x-opencode-session", ids.SessionID)
+	userAgent := ids.UserAgent
+	if userAgent == "" {
+		userAgent = zenUserAgent
+	}
+	h.Set("User-Agent", userAgent)
 }

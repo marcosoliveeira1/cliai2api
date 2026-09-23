@@ -142,7 +142,7 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 	ids := DeriveZenRequestIDs(inbound)
 
 	if family == zenFamilyResponses {
-		responsesBody, err := chatRequestToResponses(&out)
+		responsesBody, err := chatRequestToResponses(&out, ids)
 		if err != nil {
 			return nil, nil, &invalidRequestError{message: "cannot convert chat request for Zen Responses: " + err.Error()}
 		}
@@ -349,7 +349,7 @@ func (z *ZenClient) doResponses(ctx context.Context, body []byte, apiKey string,
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	setZenHeaders(httpReq.Header, apiKey, ids)
+	setZenResponsesHeaders(httpReq.Header, apiKey, ids)
 
 	resp, err := z.Client.Do(httpReq)
 	if err != nil {

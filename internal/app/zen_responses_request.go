@@ -9,6 +9,10 @@ type zenResponsesRequest struct {
 	Model           string         `json:"model"`
 	Input           []any          `json:"input"`
 	Stream          bool           `json:"stream"`
+	Store           bool           `json:"store"`
+	Include         []string       `json:"include,omitempty"`
+	PromptCacheKey  string         `json:"prompt_cache_key,omitempty"`
+	ToolChoice      string         `json:"tool_choice,omitempty"`
 	Tools           []any          `json:"tools,omitempty"`
 	MaxOutputTokens int            `json:"max_output_tokens,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
@@ -18,8 +22,12 @@ type zenResponsesRequest struct {
 // the Responses wire shape used by Muse Spark. The upstream is always streamed
 // because this gateway's Responses adapter consumes SSE and optionally folds
 // it back into a non-streaming completion for the caller.
-func chatRequestToResponses(req *ChatRequest) ([]byte, error) {
-	out := zenResponsesRequest{Model: req.Model, Stream: true}
+func chatRequestToResponses(req *ChatRequest, ids ZenRequestIDs) ([]byte, error) {
+	out := zenResponsesRequest{
+		Model: req.Model, Stream: true, Store: false,
+		Include:        []string{"reasoning.encrypted_content"},
+		PromptCacheKey: ids.promptCacheKey(), ToolChoice: "auto",
+	}
 	if req.OutputTokenBudget() > 0 {
 		out.MaxOutputTokens = req.OutputTokenBudget()
 	}
