@@ -71,7 +71,7 @@ func authMiddleware(cfg *Config, keys *ClientKeyPool) func(http.Handler) http.Ha
 
 func isPublicPath(path string) bool {
 	switch path {
-	case "/health", "/usage", "/v1/models", "/webui", "/webui/":
+	case "/health", "/usage", "/v1/models", "/webui", "/webui/", "/favicon.ico", "/favicon.svg":
 		return true
 	}
 	switch {
@@ -203,6 +203,8 @@ func runServer(reg *Registry, cfg *Config, usage *UsageTracker, ring *logRing) e
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(usage.Snapshot())
 	})
+	mux.HandleFunc("/favicon.ico", web.FaviconHandler())
+	mux.HandleFunc("/favicon.svg", web.FaviconHandler())
 
 	// WebUI：管理 API 与内嵌的单文件界面，挂在 /webui 下，根路径留给 API。
 	adminMux := http.NewServeMux()
