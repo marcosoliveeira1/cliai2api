@@ -84,7 +84,7 @@ graph TD
 - **Purpose**: Servir Zen `chat/completions` (passthrough + free-tier shaping) e `responses` (tradução SSE→OpenAI).
 - **Location**: `internal/app/zen.go` (novo) + `zen_responses.go` (tradução) + `zen_headers.go` (headers CLI-only + sessão canônica) + `zen_free.go` (shaping + collapse).
 - **Interfaces**:
-  - `Chat(ctx, req)` — classifica `bareID` por família: lista `responsesIDs` (do catálogo `/zen/v1/models` ou sufixo conhecido) → `POST /v1/responses`; default → `POST /v1/chat/completions` com body OpenAI. Antes do envio, `IsFreeModel(bareID)` → `shapeFreeBody` (GW-03b). Semântica 4xx = `isNonRetryableClientResponse` (issues §5): 400–499 exceto 401/403/429 encerram sem rotacionar nem esfriar (402 até limpa falha via `MarkSuccess`); 401/403/429/5xx fazem failover pré-primeiro-byte com cooldown 429 (`Retry-After`, default 60s).
+  - `Chat(ctx, req)` — classifica `bareID` por família: Muse Spark (`muse-spark-*`, inclusive `-free`), GPT e Grok → converte Chat Completions para Responses e chama `POST /v1/responses`; modelos free das demais famílias → `shapeFreeBody` + `POST /v1/chat/completions`; demais chat → passthrough. Semântica 4xx = `isNonRetryableClientResponse` (issues §5): 400–499 exceto 401/403/429 encerram sem rotacionar nem esfriar (402 até limpa falha via `MarkSuccess`); 401/403/429/5xx fazem failover pré-primeiro-byte com cooldown 429 (`Retry-After`, default 60s).
   - `setZenHeaders(h, apiKey, projectID, sessionID)` — `Authorization: Bearer`, `x-opencode-client: cli`, `x-opencode-session`, `x-session-affinity`, `X-Session-Id` (mesmo valor), `x-opencode-request/project/parent`, `prompt_cache_key`, `User-Agent: opencode/<ver>`.
   - `CanonicalSessionID()` — `ses_<12hex><14base62>`; free-tier rejeita outro shape com 403 desde 2026-09-16 (issues §2). `DeriveRequestIDs()` deriva de `x-opencode-session/x-session-affinity/X-Session-Id/conversation-id/...` senão primeira mensagem user.
   - `IsFreeModel(id)` — nome contém `free` (case-insensitive); stub de pricing metadata pronto para custo-zero (sem `models.dev` no MVP).
@@ -146,7 +146,8 @@ type GatewayConfig struct {
 //  - responses: gpt-*, grok-*, muse-spark-*
 //  - chat: demais (deepseek-*, minimax-*, glm-*, kimi-*, big-pickle)
 // Desconhecido → chat (passthrough seguro).
-// Nota: `*-free` também é chat, mas passa por shapeFreeBody antes do envio (GW-03b).
+// Muse Spark é Responses mesmo com `-free`; outros modelos `*-free` usam chat
+// agent-shape antes do envio (GW-03b).
 ```
 
 ### Free-tier detection (GW-03b, issues §1)

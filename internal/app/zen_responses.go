@@ -40,19 +40,21 @@ const (
 	zenFamilyResponses
 )
 
-var zenResponsesPrefixes = []string{"gpt-", "grok-", "muse-spark-"}
+var zenResponsesPrefixes = []string{"gpt-", "grok-"}
 
 var zenChatPrefixes = []string{"deepseek-", "minimax-", "glm-", "kimi-", "big-pickle"}
 
 // classifyZenFamily maps a bare (prefix-stripped) model ID to its Zen lane.
-// Matching is prefix-based and case-insensitive. Free-tier IDs always stay
-// on chat: the free lane only serves agent-shape chat streaming (issues §1),
-// already covered by shapeFreeBody + collapseStream — even when the name
-// matches a responses prefix (e.g. muse-spark-*-free). The second return
+// Matching is prefix-based and case-insensitive. Muse Spark uses Responses,
+// including its free Contributor variant; other free-tier IDs use the shaped
+// chat lane. The second return
 // reports whether the family is known; unknown IDs fall back to chat
 // passthrough and the caller logs a [WARN].
 func classifyZenFamily(bareID string) (zenFamily, bool) {
 	lower := strings.ToLower(strings.TrimSpace(bareID))
+	if strings.HasPrefix(lower, "muse-spark-") {
+		return zenFamilyResponses, true
+	}
 	if IsFreeModel(bareID) {
 		return zenFamilyChat, true
 	}
@@ -86,15 +88,25 @@ type zenResponsesUsage struct {
 }
 
 type zenResponsesEvent struct {
-	Type     string              `json:"type"`
-	Delta    string              `json:"delta"`
-	Text     string              `json:"text"`
-	Response *zenResponsesResult `json:"response"`
-	Error    any                 `json:"error"`
+	Type     string                  `json:"type"`
+	Delta    string                  `json:"delta"`
+	Text     string                  `json:"text"`
+	Response *zenResponsesResult     `json:"response"`
+	Item     *zenResponsesOutputItem `json:"item"`
+	Error    any                     `json:"error"`
+}
+
+type zenResponsesOutputItem struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type zenResponsesParsed struct {
 	deltas    []string
+	toolCalls []ToolCall
 	finish    string
 	usage     Usage
 	haveUsage bool
@@ -166,6 +178,17 @@ func parseZenResponsesEvents(resp *http.Response) (*zenResponsesParsed, error) {
 			if text != "" {
 				out.deltas = append(out.deltas, text)
 			}
+		case "response.output_item.done":
+			if ev.Item != nil && ev.Item.Type == "function_call" {
+				id := ev.Item.CallID
+				if id == "" {
+					id = ev.Item.ID
+				}
+				out.toolCalls = append(out.toolCalls, ToolCall{
+					ID: id, Type: "function",
+					Function: CallFunc{Name: ev.Item.Name, Arguments: ev.Item.Arguments},
+				})
+			}
 		case "response.completed", "response.incomplete":
 			terminal = true
 			reason := ""
@@ -178,6 +201,9 @@ func parseZenResponsesEvents(resp *http.Response) (*zenResponsesParsed, error) {
 				}
 			}
 			out.finish = mapResponsesFinish(reason)
+			if len(out.toolCalls) > 0 {
+				out.finish = "tool_calls"
+			}
 			if ev.Response != nil && ev.Response.Usage != nil {
 				out.usage = Usage{
 					PromptTokens:     ev.Response.Usage.InputTokens,
@@ -281,12 +307,28 @@ func translateZenResponsesStream(resp *http.Response, model string) (*http.Respo
 			_, err := fmt.Fprintf(writer, "data: %s\n\n", data)
 			return err
 		}
+		writeToolCall := func(call ToolCall, index int) error {
+			chunk := ChatStreamChunk{
+				ID: streamID, Object: "chat.completion.chunk", Created: created, Model: model,
+				Choices: []StreamChoice{{Index: 0, Delta: StreamDelta{ToolCalls: []StreamToolCall{{
+					Index: index, ID: call.ID, Type: "function", Function: &call.Function,
+				}}}}},
+			}
+			data, _ := json.Marshal(chunk)
+			if !announced {
+				announced = true
+				ready <- nil
+			}
+			_, err := fmt.Fprintf(writer, "data: %s\n\n", data)
+			return err
+		}
 		var eventName string
 		var dataLines []string
 		var terminal, sawDone, haveUsage bool
 		var failed string
 		finish := "stop"
 		var usage Usage
+		toolCalls := make([]ToolCall, 0)
 		dispatch := func() error {
 			payload := strings.Join(dataLines, "\n")
 			dataLines = nil
@@ -315,6 +357,16 @@ func translateZenResponsesStream(resp *http.Response, model string) (*http.Respo
 				if delta != "" {
 					return writeChunk(delta, nil, nil)
 				}
+			case "response.output_item.done":
+				if ev.Item != nil && ev.Item.Type == "function_call" {
+					id := ev.Item.CallID
+					if id == "" {
+						id = ev.Item.ID
+					}
+					call := ToolCall{ID: id, Type: "function", Function: CallFunc{Name: ev.Item.Name, Arguments: ev.Item.Arguments}}
+					toolCalls = append(toolCalls, call)
+					return writeToolCall(call, len(toolCalls)-1)
+				}
 			case "response.completed", "response.incomplete":
 				terminal = true
 				reason := ""
@@ -334,6 +386,9 @@ func translateZenResponsesStream(resp *http.Response, model string) (*http.Respo
 					}
 				}
 				finish = mapResponsesFinish(reason)
+				if len(toolCalls) > 0 {
+					finish = "tool_calls"
+				}
 			case "response.failed":
 				terminal = true
 				failed = "upstream responses request failed"
@@ -424,7 +479,7 @@ func aggregateZenResponses(resp *http.Response, model string) (*http.Response, e
 		Model:   model,
 		Choices: []Choice{{
 			Index:        0,
-			Message:      Message{Role: "assistant", Content: TextContent(strings.Join(parsed.deltas, ""))},
+			Message:      Message{Role: "assistant", Content: TextContent(strings.Join(parsed.deltas, "")), ToolCalls: parsed.toolCalls},
 			FinishReason: parsed.finish,
 		}},
 	}

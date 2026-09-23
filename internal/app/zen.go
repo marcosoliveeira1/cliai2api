@@ -123,10 +123,14 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 	if rest, ok := strings.CutPrefix(out.Model, OpencodePrefix); ok {
 		out.Model = rest
 	}
+	family, known := classifyZenFamily(out.Model)
+	if !known {
+		log.Printf("[WARN] unknown zen model family %q, falling back to chat passthrough", out.Model)
+	}
 	// Free-tier lane only serves agent-shape streaming (issues §1): rewrite
-	// the body before the upstream sees it. When the client asked for
-	// stream:false, the SSE below is collapsed back into chat.completion.
-	shaped := shapeFreeBody(&out)
+	// chat requests before the upstream sees them. Muse Spark free variants
+	// use the Responses API and must retain the caller's request shape instead.
+	shaped := family == zenFamilyChat && shapeFreeBody(&out)
 	wantCollapse := shaped && !req.Stream
 	body, err := json.Marshal(&out)
 	if err != nil {
@@ -137,12 +141,12 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 	// prompt-cache affinity holds across keys.
 	ids := DeriveZenRequestIDs(inbound)
 
-	family, known := classifyZenFamily(out.Model)
-	if !known {
-		log.Printf("[WARN] unknown zen model family %q, falling back to chat passthrough", out.Model)
-	}
 	if family == zenFamilyResponses {
-		return z.chatResponses(ctx, &out, req.Stream, body, ids)
+		responsesBody, err := chatRequestToResponses(&out)
+		if err != nil {
+			return nil, nil, &invalidRequestError{message: "cannot convert chat request for Zen Responses: " + err.Error()}
+		}
+		return z.chatResponses(ctx, &out, req.Stream, responsesBody, ids)
 	}
 
 	pool := z.Pool()

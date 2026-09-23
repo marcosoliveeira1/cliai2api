@@ -27,7 +27,7 @@ func TestClassifyZenFamily(t *testing.T) {
 		{name: "gpt case-insensitive", id: "GPT-5.5", family: zenFamilyResponses, known: true},
 		{name: "grok responses", id: "grok-4", family: zenFamilyResponses, known: true},
 		{name: "muse-spark responses", id: "muse-spark-1.3-contributor", family: zenFamilyResponses, known: true},
-		{name: "free stays chat", id: "muse-spark-1.3-contributor-free", family: zenFamilyChat, known: true},
+		{name: "muse free uses responses", id: "muse-spark-1.3-contributor-free", family: zenFamilyResponses, known: true},
 		{name: "gpt-free stays chat", id: "gpt-5.5-free", family: zenFamilyChat, known: true},
 		{name: "deepseek chat", id: "deepseek-v4-flash", family: zenFamilyChat, known: true},
 		{name: "minimax chat", id: "minimax-m2", family: zenFamilyChat, known: true},
@@ -79,12 +79,15 @@ func TestZenResponsesStreamTranslatesToOpenAIChunks(t *testing.T) {
 	if !strings.HasSuffix(strings.TrimSpace(body), "data: [DONE]") {
 		t.Fatalf("stream does not end with data: [DONE]:\n%s", body)
 	}
-	var decoded ChatRequest
+	var decoded zenResponsesRequest
 	if err := json.Unmarshal(calls[0].body, &decoded); err != nil {
 		t.Fatalf("upstream body is not valid JSON: %v", err)
 	}
 	if decoded.Model != "gpt-5.5" {
 		t.Fatalf("upstream model = %q, want bare id without prefix", decoded.Model)
+	}
+	if !decoded.Stream || len(decoded.Input) != 1 {
+		t.Fatalf("upstream Responses request = %+v, want streamed input message", decoded)
 	}
 }
 
@@ -282,18 +285,16 @@ func TestZenUnknownFamilyFallsBackToChatPassthrough(t *testing.T) {
 	}
 }
 
-// GW-03b ordering guard: shaping applies before translation for free models —
-// a free id with a responses prefix still rides the chat lane with tools.
-func TestZenFreeShapingWinsOverResponsesClassification(t *testing.T) {
+// Muse Spark's free Contributor model uses Zen's Responses endpoint and
+// must not be rewritten into the chat-only agent-shape request.
+func TestZenMuseFreeUsesResponsesEndpoint(t *testing.T) {
 	var gotPath string
-	var gotTools int
+	var gotBody map[string]json.RawMessage
 	var fake *zenFake
 	fake = newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {
 		gotPath = fake.all()[call-1].path
-		var decoded ChatRequest
-		_ = json.Unmarshal(fake.all()[call-1].body, &decoded)
-		gotTools = len(decoded.Tools)
-		return http.StatusOK, nil, `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"x","choices":[]}`
+		_ = json.Unmarshal(fake.all()[call-1].body, &gotBody)
+		return http.StatusOK, map[string]string{"Content-Type": "text/event-stream"}, zenResponsesSSE
 	})
 	client := NewZenClientWithPool(poolWithKeys("zen-key-a"), fake.srv.URL)
 
@@ -308,10 +309,13 @@ func TestZenFreeShapingWinsOverResponsesClassification(t *testing.T) {
 	}
 	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if gotPath != "/v1/chat/completions" {
-		t.Fatalf("upstream path = %q, want /v1/chat/completions", gotPath)
+	if gotPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", gotPath)
 	}
-	if gotTools != 5 {
-		t.Fatalf("upstream tools = %d, want 5 shaped core tools", gotTools)
+	if _, ok := gotBody["input"]; !ok {
+		t.Fatalf("upstream request has no Responses input: %+v", gotBody)
+	}
+	if _, ok := gotBody["messages"]; ok {
+		t.Fatalf("upstream request still has Chat Completions messages: %+v", gotBody)
 	}
 }

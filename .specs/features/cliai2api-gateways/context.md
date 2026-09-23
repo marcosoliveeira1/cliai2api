@@ -75,8 +75,9 @@ Transformar `cmdcode2api` em `cliai2api` multi-gateway (cmdcode + opencode zen, 
      2026-09-16; `msg_<12hex><14base62>` e `prj_<12hex>` seguem o mesmo esquema.
   3. `User-Agent` carrega a versão `opencode/1.18.31` (constante `zenCLIVersion`
      em `internal/app/zen_headers.go` — atualizar quando o CLI for recapturado).
-- **Follow-up:** antes de staging contra `muse-spark-*-free`, recapturar com
-  mitmproxy + CLI real e corrigir divergências aqui.
+- **Follow-up:** recapturar com mitmproxy + CLI real se houver divergências de
+  sessão/headers. Muse Spark free usa Responses conforme o catálogo Zen atual;
+  modelos free de chat continuam no caminho de agent-shape.
 
 ---
 

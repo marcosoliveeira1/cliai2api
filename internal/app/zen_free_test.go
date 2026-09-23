@@ -56,7 +56,7 @@ func TestIsFreeModel(t *testing.T) {
 // stream_options.include_usage.
 func TestShapeFreeBodyForcesAgentShape(t *testing.T) {
 	req := &ChatRequest{
-		Model:    "opencode/muse-spark-1.3-contributor-free",
+		Model:    "opencode/nemotron-3-ultra-free",
 		Messages: []Message{{Role: "user", Content: TextContent("hi")}},
 	}
 	if !shapeFreeBody(req) {
@@ -197,7 +197,7 @@ func TestZenChatFreeAgentShapeGate(t *testing.T) {
 	client := NewZenClientWithPool(poolWithKeys("zen-key-a"), fake.srv.URL)
 
 	req := &ChatRequest{
-		Model:    "opencode/muse-spark-1.3-contributor-free",
+		Model:    "opencode/nemotron-3-ultra-free",
 		Messages: []Message{{Role: "user", Content: TextContent("hi")}},
 		Stream:   false,
 	}
@@ -276,7 +276,7 @@ func TestZenChatFreeStreamPassesThrough(t *testing.T) {
 	})
 	client := NewZenClientWithPool(poolWithKeys("zen-key-a"), fake.srv.URL)
 
-	resp, _, err := client.Chat(context.Background(), zenChatReq("opencode/muse-spark-1.3-contributor-free"))
+	resp, _, err := client.Chat(context.Background(), zenChatReq("opencode/nemotron-3-ultra-free"))
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
