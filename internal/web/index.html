@@ -1158,6 +1158,8 @@ function quotaMonthBar(q) {
 }
 
 function quotaDetail(a) {
+  // OpenCode Zen does not expose the Command Code quota API.
+  if ((a.gateway || "cmdcode") === "zen") return "";
   const q = a.quota;
   if (!q) {
     return `<div class="faint">${esc(t("quota.notSynced"))}</div>`;
@@ -1434,7 +1436,7 @@ function accountCard(a) {
     </div>
     <div class="acc-sec">${quotaDetail(a)}</div>
     <div class="acc-actions">
-      <button class="btn small" onclick="refreshAccountQuota('${a.id}', '${a.gateway || "cmdcode"}')">${esc(t("quota.refreshOne"))}</button>
+      ${a.gateway === "zen" ? "" : `<button class="btn small" onclick="refreshAccountQuota('${a.id}', '${a.gateway || "cmdcode"}')">${esc(t("quota.refreshOne"))}</button>`}
       <button class="btn small" onclick="testAccount('${a.id}', '${a.gateway || "cmdcode"}')">${esc(t("common.test"))}</button>
       <button class="btn small" onclick="openAccountEdit('${a.id}', '${esc(a.name)}', '${a.gateway || "cmdcode"}')">${esc(t("common.edit"))}</button>
       <button class="btn small" onclick="toggleAccount('${a.id}', '${a.gateway || "cmdcode"}', ${a.enabled ? "false" : "true"})">${a.enabled ? esc(t("common.disable")) : esc(t("common.enable"))}</button>
