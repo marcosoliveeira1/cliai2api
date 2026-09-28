@@ -182,6 +182,7 @@ func TestSetZenResponsesHeadersPreservesOpenCodeIdentity(t *testing.T) {
 	for k, want := range map[string]string{
 		"x-opencode-org-id": "wrk_example", "x-opencode-project": "project-from-caller",
 		"x-opencode-session": "session-from-caller", "x-opencode-request": "request-from-caller",
+		"x-session-affinity": "session-from-caller", "X-Session-Id": "session-from-caller",
 		"User-Agent": inbound.Get("User-Agent"), "Authorization": "Bearer zen-key",
 	} {
 		if got := h.Get(k); got != want {
@@ -190,5 +191,31 @@ func TestSetZenResponsesHeadersPreservesOpenCodeIdentity(t *testing.T) {
 	}
 	if h.Get("x-opencode-parent") != "" || h.Get("prompt_cache_key") != "" {
 		t.Errorf("Responses headers include chat-only values: %+v", h)
+	}
+}
+
+func TestZenUpstreamUserAgentFallsBackForForeignUA(t *testing.T) {
+	for _, ua := range []string{"", "curl/8.7.1", "Go-http-client/2.0", "python-requests/2.31"} {
+		if got := zenUpstreamUserAgent(ua); got != zenUserAgent {
+			t.Errorf("zenUpstreamUserAgent(%q) = %q, want default %q", ua, got, zenUserAgent)
+		}
+	}
+}
+
+func TestZenUpstreamUserAgentPreservesOpenCodeUA(t *testing.T) {
+	ua := "opencode/1.18.32 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
+	if got := zenUpstreamUserAgent(ua); got != ua {
+		t.Errorf("zenUpstreamUserAgent(%q) = %q, want preserved", ua, got)
+	}
+}
+
+func TestSetZenResponsesHeadersOverridesForeignUA(t *testing.T) {
+	inbound := http.Header{}
+	inbound.Set("User-Agent", "curl/8.7.1")
+	ids := DeriveZenRequestIDs(inbound)
+	h := http.Header{}
+	setZenResponsesHeaders(h, "zen-key", ids)
+	if got := h.Get("User-Agent"); got != zenUserAgent {
+		t.Errorf("User-Agent = %q, want default %q", got, zenUserAgent)
 	}
 }

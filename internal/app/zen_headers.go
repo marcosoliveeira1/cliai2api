@@ -128,6 +128,19 @@ func DeriveZenRequestIDs(inbound http.Header) ZenRequestIDs {
 	return ids
 }
 
+// zenUpstreamUserAgent picks the User-Agent sent upstream. The Zen free tier
+// only serves requests that look like they come from OpenCode, so a foreign
+// caller UA (curl, SDKs) is never forwarded; an OpenCode caller UA is
+// preserved for sticky identity.
+func zenUpstreamUserAgent(inbound string) string {
+	if ua := strings.TrimSpace(inbound); ua != "" {
+		if strings.HasPrefix(strings.ToLower(ua), "opencode/") {
+			return ua
+		}
+	}
+	return zenUserAgent
+}
+
 // setZenHeaders applies the headers the official opencode CLI sends. Every
 // Zen upstream call goes through it so the client identity stays identical
 // across chat and responses paths.
@@ -144,16 +157,14 @@ func setZenHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("x-session-affinity", ids.SessionID)
 	h.Set("X-Session-Id", ids.SessionID)
 	h.Set("prompt_cache_key", ids.promptCacheKey())
-	userAgent := ids.UserAgent
-	if userAgent == "" {
-		userAgent = zenUserAgent
-	}
-	h.Set("User-Agent", userAgent)
+	h.Set("User-Agent", zenUpstreamUserAgent(ids.UserAgent))
 }
 
 // setZenResponsesHeaders emits the identity headers observed on Zen Responses
-// requests. Chat-only affinity aliases and the cache key header are omitted;
-// Responses carries prompt_cache_key in its JSON body.
+// requests. The free tier rejects anonymous requests without session affinity
+// (X-Session-Id), so the session aliases travel here too; only the chat-only
+// x-opencode-parent and the cache key header are omitted (Responses carries
+// prompt_cache_key in its JSON body).
 func setZenResponsesHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("Authorization", "Bearer "+apiKey)
 	h.Set("Content-Type", "application/json")
@@ -164,9 +175,7 @@ func setZenResponsesHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("x-opencode-project", ids.ProjectID)
 	h.Set("x-opencode-request", ids.RequestID)
 	h.Set("x-opencode-session", ids.SessionID)
-	userAgent := ids.UserAgent
-	if userAgent == "" {
-		userAgent = zenUserAgent
-	}
-	h.Set("User-Agent", userAgent)
+	h.Set("x-session-affinity", ids.SessionID)
+	h.Set("X-Session-Id", ids.SessionID)
+	h.Set("User-Agent", zenUpstreamUserAgent(ids.UserAgent))
 }
