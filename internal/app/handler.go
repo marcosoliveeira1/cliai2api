@@ -58,7 +58,6 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 			writeError(w, 404, "invalid_request_error", fmt.Sprintf("model %q is not available", req.Model))
 			return
 		}
-		log.Printf("[INFO] chat completions model=%q gateway=%s", req.Model, gateway.Name())
 		routed := req
 		routed.Model = bareID
 
@@ -77,7 +76,7 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 			}
 			var upstreamErr *upstreamAPIError
 			if errors.As(err, &upstreamErr) {
-				log.Printf("%s gateway=%s chat request failed: %v", colorize("[ERROR]", ansiRed), gateway.Name(), upstreamErr)
+				log.Printf("%s gateway=%s account=%q chat request failed: %v", colorize("[ERROR]", ansiRed), gateway.Name(), accountLogName(acct), upstreamErr)
 				if upstreamErr.RetryAfter != "" {
 					w.Header().Set("Retry-After", upstreamErr.RetryAfter)
 				}
@@ -87,10 +86,12 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 				writeErrorWithCode(w, upstreamErr.Status, upstreamErr.Type, upstreamErr.Code, upstreamErr.Message)
 				return
 			}
-			log.Printf("%s gateway=%s chat request failed: %v", colorize("[ERROR]", ansiRed), gateway.Name(), err)
+			log.Printf("%s gateway=%s account=%q chat request failed: %v", colorize("[ERROR]", ansiRed), gateway.Name(), accountLogName(acct), err)
 			writeError(w, http.StatusBadGateway, "server_error", "upstream error: "+err.Error())
 			return
 		}
+
+		log.Printf("[INFO] chat completions model=%q gateway=%s account=%q", req.Model, gateway.Name(), accountLogName(acct))
 
 		if gateway.Name() == GatewayOpencode {
 			handleOpenAIResponse(w, resp, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())))
@@ -441,6 +442,15 @@ func handleModels(cfg *Config) http.HandlerFunc {
 }
 
 // ====================== helpers ======================
+
+// accountLogName returns the upstream account name for LLM action logs.
+// Empty when no account served the request (e.g. pool vazio); nunca expõe a chave.
+func accountLogName(a *Account) string {
+	if a == nil {
+		return ""
+	}
+	return a.Name
+}
 
 func writeError(w http.ResponseWriter, status int, typ, msg string) {
 	writeErrorWithCode(w, status, typ, "", msg)
