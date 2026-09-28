@@ -62,6 +62,27 @@ func freeCoreTools() []Tool {
 	}
 }
 
+// ensureFreeTools injects absent core agent tools without touching stream
+// flags. The Responses converter forwards declared tools verbatim, and the
+// anonymous free tier rejects tool-less agent requests.
+func ensureFreeTools(req *ChatRequest) {
+	if req == nil {
+		return
+	}
+	// Detach from the caller's backing array so appends never mutate it.
+	req.Tools = append([]Tool(nil), req.Tools...)
+	present := make(map[string]bool, len(req.Tools))
+	for _, t := range req.Tools {
+		present[strings.ToLower(t.Function.Name)] = true
+	}
+	for _, core := range freeCoreTools() {
+		if !present[strings.ToLower(core.Function.Name)] {
+			req.Tools = append(req.Tools, core)
+			present[strings.ToLower(core.Function.Name)] = true
+		}
+	}
+}
+
 // shapeFreeBody rewrites a free-tier request into agent shape: forces
 // stream:true, injects absent core tools, and sets
 // stream_options.include_usage. Non-free models pass through intact
@@ -76,18 +97,7 @@ func shapeFreeBody(req *ChatRequest) bool {
 		req.StreamOptions = &StreamOptions{}
 	}
 	req.StreamOptions.IncludeUsage = true
-	// Detach from the caller's backing array so appends never mutate it.
-	req.Tools = append([]Tool(nil), req.Tools...)
-	present := make(map[string]bool, len(req.Tools))
-	for _, t := range req.Tools {
-		present[strings.ToLower(t.Function.Name)] = true
-	}
-	for _, core := range freeCoreTools() {
-		if !present[strings.ToLower(core.Function.Name)] {
-			req.Tools = append(req.Tools, core)
-			present[strings.ToLower(core.Function.Name)] = true
-		}
-	}
+	ensureFreeTools(req)
 	return true
 }
 

@@ -19,6 +19,17 @@ import (
 // through unless overridden via SetBaseURL (tests point it at httptest fakes).
 const defaultZenBaseURL = "https://opencode.ai/zen"
 
+// zenAnonymousKey is the shared public credential the Zen free tier expects.
+// Free-tier models reject real account keys with permission_denied ("can
+// only be used from within OpenCode"); anonymous requests carry this key
+// plus the standard CLI identity headers. Keyed accounts stay as fallback
+// when the anonymous attempt fails.
+const zenAnonymousKey = "public"
+
+// anonymousAccount stands in for the public credential in logs and usage
+// counters. It is never a member of any pool.
+var anonymousAccount = newAccount("anonymous(public)", zenAnonymousKey, true)
+
 // ZenClient sends requests to the OpenCode Zen upstream, rotating across the
 // accounts in its pool and failing over on account-scoped errors. It mirrors
 // the CCClient failover loop shape, except the 4xx semantics follow
@@ -142,11 +153,27 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 	ids := DeriveZenRequestIDs(inbound)
 
 	if family == zenFamilyResponses {
+		// Responses free models need the same agent-shape tools the chat
+		// lane gets from shapeFreeBody; the converter only forwards
+		// declared tools, and the anonymous tier rejects tool-less calls.
+		if IsFreeModel(out.Model) {
+			ensureFreeTools(&out)
+		}
 		responsesBody, err := chatRequestToResponses(&out, ids)
 		if err != nil {
 			return nil, nil, &invalidRequestError{message: "cannot convert chat request for Zen Responses: " + err.Error()}
 		}
 		return z.chatResponses(ctx, &out, req.Stream, responsesBody, ids)
+	}
+
+	// Free-tier lane: the upstream only serves *-free models to the shared
+	// public credential. Try it before the keyed accounts.
+	if IsFreeModel(out.Model) {
+		if resp, acct, err := z.chatAnonymous(ctx, body, ids, wantCollapse, bareModel(req.Model)); err == nil {
+			return resp, acct, nil
+		} else {
+			log.Printf("[WARN] anonymous free-tier attempt for %q failed, falling back to accounts: %v", out.Model, err)
+		}
 	}
 
 	pool := z.Pool()
@@ -217,6 +244,25 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 	}
 }
 
+// chatAnonymous serves one chat-lane request through the shared public
+// credential the free tier requires. It mirrors the keyed success path
+// (including stream collapse) without touching any pool account.
+func (z *ZenClient) chatAnonymous(ctx context.Context, body []byte, ids ZenRequestIDs, wantCollapse bool, model string) (*http.Response, *Account, error) {
+	resp, err := z.doChat(ctx, body, zenAnonymousKey, ids)
+	if err != nil {
+		return nil, anonymousAccount, err
+	}
+	anonymousAccount.RecordSuccess()
+	if wantCollapse {
+		collapsed, cerr := collapseStream(resp, model)
+		if cerr != nil {
+			return nil, anonymousAccount, cerr
+		}
+		return collapsed, anonymousAccount, nil
+	}
+	return resp, anonymousAccount, nil
+}
+
 // isNonRetryableClientResponse reports whether an upstream error is
 // deterministic per request: 400–499 except 401/403/429 would fail identically
 // on every key, so the Zen path ends the attempt instead of failing over.
@@ -285,6 +331,15 @@ func (z *ZenClient) chatResponses(ctx context.Context, out *ChatRequest, wantStr
 	}
 
 	model := out.Model
+	// Free-tier lane first: the upstream only serves *-free models to the
+	// shared public credential. Keyed accounts stay as fallback.
+	if IsFreeModel(model) {
+		if resp, acct, err := z.chatResponsesAnonymous(ctx, wantStream, body, ids, model); err == nil {
+			return resp, acct, nil
+		} else {
+			log.Printf("[WARN] anonymous free-tier attempt for %q failed, falling back to accounts: %v", model, err)
+		}
+	}
 	var lastErr error
 	var lastAcct *Account
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -341,6 +396,29 @@ func (z *ZenClient) chatResponses(ctx context.Context, out *ChatRequest, wantStr
 		Message:    message,
 		RetryAfter: retryAfter,
 	}
+}
+
+// chatResponsesAnonymous serves one responses-lane request through the
+// shared public credential the free tier requires, translating the SSE the
+// same way the keyed path does.
+func (z *ZenClient) chatResponsesAnonymous(ctx context.Context, wantStream bool, body []byte, ids ZenRequestIDs, model string) (*http.Response, *Account, error) {
+	resp, err := z.doResponses(ctx, body, zenAnonymousKey, ids)
+	if err != nil {
+		return nil, anonymousAccount, err
+	}
+	anonymousAccount.RecordSuccess()
+	if wantStream {
+		translated, terr := translateZenResponsesStream(resp, model)
+		if terr != nil {
+			return nil, anonymousAccount, terr
+		}
+		return translated, anonymousAccount, nil
+	}
+	aggregated, aerr := aggregateZenResponses(resp, model)
+	if aerr != nil {
+		return nil, anonymousAccount, aerr
+	}
+	return aggregated, anonymousAccount, nil
 }
 
 func (z *ZenClient) doResponses(ctx context.Context, body []byte, apiKey string, ids ZenRequestIDs) (*http.Response, error) {
