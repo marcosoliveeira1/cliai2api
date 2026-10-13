@@ -32,6 +32,44 @@ func TestCanonicalSessionIDUnique(t *testing.T) {
 	}
 }
 
+func TestCanonicalSessionIDHasDescendingTimePart(t *testing.T) {
+	// The Zen free tier only accepts time parts in the descending() counter
+	// window (low 12 bits 0xFC0-0xFFF); a random hex time part is rejected.
+	for i := 0; i < 50; i++ {
+		got := CanonicalSessionID()
+		if !descendingTimePartPattern.MatchString(got[4:16]) {
+			t.Fatalf("CanonicalSessionID() = %q has non-descending time part %q", got, got[4:16])
+		}
+	}
+}
+
+func TestCanonicalizeSessionIDReencodesForeign(t *testing.T) {
+	for _, foreign := range []string{
+		"session-from-caller",
+		"550e8400-e29b-41d4-a716-446655440000",
+		"ses_deadbeefcafe00112233445566", // right-ish shape, wrong time-part encoding
+	} {
+		got := canonicalizeSessionID(foreign)
+		if !sesPattern.MatchString(got) || !descendingTimePartPattern.MatchString(got[4:16]) {
+			t.Fatalf("canonicalizeSessionID(%q) = %q, want canonical descending session", foreign, got)
+		}
+		if again := canonicalizeSessionID(foreign); again != got {
+			t.Fatalf("canonicalizeSessionID(%q) not deterministic: %q != %q", foreign, got, again)
+		}
+		// Idempotent: re-encoding an already-canonical session is a no-op.
+		if settled := canonicalizeSessionID(got); settled != got {
+			t.Fatalf("canonicalizeSessionID(%q) not idempotent: %q", got, settled)
+		}
+	}
+}
+
+func TestCanonicalizeSessionIDPreservesOfficial(t *testing.T) {
+	official := CanonicalSessionID()
+	if got := canonicalizeSessionID(official); got != official {
+		t.Fatalf("canonicalizeSessionID(%q) = %q, want preserved verbatim", official, got)
+	}
+}
+
 func TestCanonicalMessageAndProjectIDFormat(t *testing.T) {
 	if got := CanonicalMessageID(); !msgPattern.MatchString(got) {
 		t.Fatalf("CanonicalMessageID() = %q, want msg_<12hex><14base62>", got)
@@ -170,10 +208,11 @@ func TestSetZenHeadersClientOverridePropagates(t *testing.T) {
 }
 
 func TestSetZenResponsesHeadersPreservesOpenCodeIdentity(t *testing.T) {
+	callerSession := CanonicalSessionID()
 	inbound := http.Header{}
 	inbound.Set("x-opencode-org-id", "wrk_example")
 	inbound.Set("x-opencode-project", "project-from-caller")
-	inbound.Set("x-opencode-session", "session-from-caller")
+	inbound.Set("x-opencode-session", callerSession)
 	inbound.Set("x-opencode-request", "request-from-caller")
 	inbound.Set("User-Agent", "opencode/1.18.32 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14")
 	ids := DeriveZenRequestIDs(inbound)
@@ -181,8 +220,8 @@ func TestSetZenResponsesHeadersPreservesOpenCodeIdentity(t *testing.T) {
 	setZenResponsesHeaders(h, "zen-key", ids)
 	for k, want := range map[string]string{
 		"x-opencode-org-id": "wrk_example", "x-opencode-project": "project-from-caller",
-		"x-opencode-session": "session-from-caller", "x-opencode-request": "request-from-caller",
-		"x-opencode-session-id": "session-from-caller",
+		"x-opencode-session": callerSession, "x-opencode-request": "request-from-caller",
+		"x-opencode-session-id": callerSession,
 		"User-Agent":            inbound.Get("User-Agent"), "Authorization": "Bearer zen-key",
 	} {
 		if got := h.Get(k); got != want {

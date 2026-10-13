@@ -2,9 +2,12 @@ package app
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"math/big"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -56,11 +59,73 @@ func zenRandomBytes(n int) []byte {
 	return b
 }
 
-// CanonicalSessionID generates a session in the canonical shape
-// ses_<12hex><14base62>. Since 2026-09-16 the Zen free tier rejects any
-// other session shape with 403 (see .spec/issues.md §2).
+// canonicalSessionPattern matches OpenCode's canonical session format:
+// "ses_" + 12 lowercase-hex time part + 14 base62 random part.
+var canonicalSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
+// descendingTimePartPattern matches the time part the official opencode client
+// mints with Identifier.descending(): the 48-bit value ~(ts_ms<<12 | counter)
+// in hex. The bitwise NOT sets the low 12 bits, so a genuine time part ends in
+// 0xFFF-counter. Live probing (opencode2api, 2026-10-13) shows the Zen free
+// tier accepts counters 1-63 (low 12 bits 0xFC0-0xFFF) and rejects everything
+// else with 403 FreeTierError *even when the ses_ shape is otherwise right* —
+// so a random-hex time part is almost always refused. See .spec/issues.md.
+var descendingTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
+
+// CanonicalSessionID generates a fresh session in the canonical shape the Zen
+// free tier accepts: ses_<12hex time part><14base62>, where the time part is a
+// valid Identifier.descending() value (counter 1, low 12 bits "ffe"). A random
+// 12-hex time part passes the tier's encoding check only ~1.5% of the time, so
+// generation routes through canonicalizeSessionID from a random seed.
 func CanonicalSessionID() string {
-	return "ses_" + hex.EncodeToString(zenRandomBytes(6)) + zenBase62String(14)
+	return canonicalizeSessionID(hex.EncodeToString(zenRandomBytes(16)))
+}
+
+// canonicalizeSessionID returns signal unchanged when it is already an official
+// descending() session (preserving an opencode client's upstream prompt-cache
+// affinity). Any other identity — a foreign client session, a UUID, a legacy
+// random-hex gateway session, or a bare conversation seed — is deterministically
+// re-encoded into the exact descending() layout (counter 1 → low 12 hex "ffe")
+// while staying stable per input, so it passes the free tier's encoding check
+// where the raw shape was rejected with 403 FreeTierError.
+func canonicalizeSessionID(signal string) string {
+	if canonicalSessionPattern.MatchString(signal) &&
+		descendingTimePartPattern.MatchString(signal[4:16]) {
+		return signal
+	}
+	sum := sha256.Sum256([]byte("ses\x00" + signal))
+	timePart := descendingTimePart(sum[:6])
+	randomPart := base62Fixed(new(big.Int).SetBytes(sum[6:16]), 14)
+	return "ses_" + timePart + randomPart
+}
+
+// descendingTimePart renders six bytes as the official client's
+// Identifier.descending() layout: a timestamp shifted into the top of a 48-bit
+// word, ORed with counter 1, then bitwise-NOT-ed so the low 12 hex digits read
+// "ffe". The input bytes only vary the high bits, so the counter window the
+// free tier requires is always satisfied.
+func descendingTimePart(hash []byte) string {
+	current := (uint64(hash[0])<<28 | uint64(hash[1])<<20 | uint64(hash[2])<<12 |
+		uint64(hash[3])<<4 | uint64(hash[4])>>4) << 12
+	current |= 1
+	inverted := ^current & 0xFFFFFFFFFFFF
+	return hex.EncodeToString([]byte{
+		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),
+		byte(inverted >> 16), byte(inverted >> 8), byte(inverted),
+	})
+}
+
+// base62Fixed renders n as exactly width base62 digits, zero-padded on the
+// left. The 10-byte (80-bit) random source always fits in 14 digits.
+func base62Fixed(n *big.Int, width int) string {
+	base := big.NewInt(int64(len(zenBase62)))
+	out := make([]byte, width)
+	rem := new(big.Int)
+	for i := width - 1; i >= 0; i-- {
+		n.DivMod(n, base, rem)
+		out[i] = zenBase62[rem.Int64()]
+	}
+	return string(out)
 }
 
 // CanonicalMessageID generates a request-scoped message ID in the same
@@ -123,6 +188,11 @@ func DeriveZenRequestIDs(inbound http.Header) ZenRequestIDs {
 	}
 	if ids.SessionID == "" {
 		ids.SessionID = CanonicalSessionID()
+	} else {
+		// A caller-supplied session only preserves affinity if the free tier
+		// accepts its encoding; re-encode anything that is not already an
+		// official descending() session (idempotent for ones that are).
+		ids.SessionID = canonicalizeSessionID(ids.SessionID)
 	}
 	if ids.RequestID == "" {
 		ids.RequestID = CanonicalMessageID()

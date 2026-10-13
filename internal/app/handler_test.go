@@ -96,7 +96,8 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 	usage := &UsageTracker{}
 	handler := handleChatCompletions(reg, &Config{}, usage)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}`))
-	req.Header.Set("x-opencode-session", "ses_client_session")
+	clientSession := canonicalizeSessionID("client-conversation")
+	req.Header.Set("x-opencode-session", clientSession)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -109,8 +110,8 @@ func TestRouterRoutesOpencodeToZen(t *testing.T) {
 	if zenModel != "deepseek-v4-flash" {
 		t.Fatalf("zen upstream model = %q, want deepseek-v4-flash (prefix stripped)", zenModel)
 	}
-	if zenSession != "ses_client_session" {
-		t.Fatalf("zen session = %q, want caller session", zenSession)
+	if zenSession != clientSession {
+		t.Fatalf("zen session = %q, want caller session %q preserved", zenSession, clientSession)
 	}
 	if !strings.Contains(rec.Body.String(), `"object":"chat.completion"`) || !strings.Contains(rec.Body.String(), `"content":"hi"`) {
 		t.Fatalf("response = %s, want Zen OpenAI completion", rec.Body.String())
