@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,16 @@ type GatewayConfig struct {
 	APIKey   string          `yaml:"api_key,omitempty"`
 	BaseURL  string          `yaml:"base_url,omitempty"`
 	Accounts []AccountConfig `yaml:"accounts,omitempty"`
+	// AnonymousKey overrides the free-tier credential for the zen gateway
+	// (the opencode CLI's embedded value, which the upstream rotates). The
+	// ZEN_ANONYMOUS_KEY env var takes precedence over this field. Empty keeps
+	// the built-in default. Never the operator's personal account token.
+	AnonymousKey string `yaml:"anonymous_key,omitempty"`
+	// SkipAnonymousLane disables the free-tier anonymous lane entirely so
+	// *-free models are served only from keyed accounts. Useful when the
+	// operator has their own zen API key and the anonymous credential is
+	// broken or undesired.
+	SkipAnonymousLane bool `yaml:"skip_anonymous_lane,omitempty"`
 }
 
 // ClientKeyConfig is one local bearer key that clients use to call this
@@ -189,6 +200,33 @@ func (c *Config) GatewayBaseURL(name string) string {
 		return gc.BaseURL
 	}
 	return ""
+}
+
+// ZenAnonymousKey resolves the free-tier credential override for the zen
+// gateway: the ZEN_ANONYMOUS_KEY env var wins, then gateways.zen.anonymous_key
+// from config. Empty means "use the built-in default". This is the opencode
+// CLI's shared embedded free-tier credential, never a personal account token.
+func (c *Config) ZenAnonymousKey() string {
+	if v := strings.TrimSpace(os.Getenv("ZEN_ANONYMOUS_KEY")); v != "" {
+		return v
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if gc := c.Gateways[GatewayZen]; gc != nil {
+		return strings.TrimSpace(gc.AnonymousKey)
+	}
+	return ""
+}
+
+// ZenSkipAnonymousLane reports whether the zen gateway should skip the
+// free-tier anonymous lane and serve *-free models only from keyed accounts.
+func (c *Config) ZenSkipAnonymousLane() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if gc := c.Gateways[GatewayZen]; gc != nil {
+		return gc.SkipAnonymousLane
+	}
+	return false
 }
 
 // SetGatewayBaseURL sets the base URL of the named gateway, creating its

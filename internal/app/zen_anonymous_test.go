@@ -122,6 +122,81 @@ func TestZenResponsesFreeFallsBackToPool(t *testing.T) {
 	}
 }
 
+// A configured anonymous key overrides the default on the free-tier lane
+// without leaking the key value into the account label.
+func TestZenSetAnonymousKeyOverridesCredential(t *testing.T) {
+	const override = "ccgw-override-free-tier"
+	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {
+		if r.Header.Get("Authorization") != "Bearer "+override {
+			return http.StatusForbidden, nil, zenForbiddenBody
+		}
+		return http.StatusOK, map[string]string{"Content-Type": "text/event-stream"}, zenResponsesSSE
+	})
+	client := NewZenClientWithPool(poolWithKeys("zen-key-a"), fake.srv.URL)
+	client.SetAnonymousKey(override)
+
+	req := zenChatReq("opencode/muse-spark-1.3-contributor-free")
+	req.Stream = false
+	resp, acct, err := client.Chat(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	resp.Body.Close()
+	calls := fake.all()
+	if len(calls) != 1 {
+		t.Fatalf("upstream calls = %d, want exactly 1 anonymous attempt with the override", len(calls))
+	}
+	if calls[0].auth != "Bearer "+override {
+		t.Errorf("auth = %q, want overridden anonymous credential", calls[0].auth)
+	}
+	if acct == nil || acct == anonymousAccount {
+		t.Errorf("acct = %+v, want a distinct overridden anonymous account", acct)
+	}
+	if acct != nil && strings.Contains(acct.Name, override) {
+		t.Errorf("account label %q leaks the credential value", acct.Name)
+	}
+}
+
+// An empty override is a no-op: the default credential stays in place.
+func TestZenSetAnonymousKeyEmptyKeepsDefault(t *testing.T) {
+	client := NewZenClientWithPool(poolWithKeys("zen-key-a"), "http://unused.example")
+	client.SetAnonymousKey("")
+	if client.anonymousKey != zenAnonymousKey || client.anonAccount != anonymousAccount {
+		t.Errorf("empty override mutated defaults: key=%q account=%+v", client.anonymousKey, client.anonAccount)
+	}
+}
+
+// SkipAnonymousLane makes *-free models go straight to keyed accounts,
+// bypassing the anonymous lane entirely.
+func TestZenSkipAnonymousLane(t *testing.T) {
+	fake := newZenFake(t, func(call int, r *http.Request) (int, map[string]string, string) {
+		if r.Header.Get("Authorization") == "Bearer "+zenAnonymousKey {
+			return http.StatusForbidden, nil, zenForbiddenBody
+		}
+		return http.StatusOK, map[string]string{"Content-Type": "text/event-stream"}, zenResponsesSSE
+	})
+	client := NewZenClientWithPool(poolWithKeys("zen-key-a"), fake.srv.URL)
+	client.SkipAnonymousLane()
+
+	req := zenChatReq("opencode/muse-spark-1.3-contributor-free")
+	req.Stream = false
+	resp, acct, err := client.Chat(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	defer resp.Body.Close()
+	calls := fake.all()
+	if len(calls) != 1 {
+		t.Fatalf("upstream calls = %d, want exactly 1 keyed attempt (no anonymous)", len(calls))
+	}
+	if calls[0].auth != "Bearer zen-key-a" {
+		t.Errorf("auth = %q, want keyed account", calls[0].auth)
+	}
+	if acct == nil || acct.Name == "anonymous(free-tier)" {
+		t.Errorf("acct = %+v, want keyed account", acct)
+	}
+}
+
 func TestEnsureFreeToolsInjectsWithoutTouchingStream(t *testing.T) {
 	req := zenChatReq("opencode/muse-spark-1.3-contributor-free")
 	req.Stream = false

@@ -311,3 +311,25 @@ func TestGatewaysRoundTrip(t *testing.T) {
 		t.Fatalf("zen base_url = %q", zen.BaseURL)
 	}
 }
+
+func TestZenAnonymousKeyPrecedence(t *testing.T) {
+	cfg := &Config{Gateways: map[string]*GatewayConfig{
+		GatewayZen: {AnonymousKey: "from-config"},
+	}}
+
+	t.Setenv("ZEN_ANONYMOUS_KEY", "")
+	if got := cfg.ZenAnonymousKey(); got != "from-config" {
+		t.Errorf("config value: got %q, want %q", got, "from-config")
+	}
+
+	t.Setenv("ZEN_ANONYMOUS_KEY", "from-env")
+	if got := cfg.ZenAnonymousKey(); got != "from-env" {
+		t.Errorf("env override: got %q, want %q", got, "from-env")
+	}
+
+	empty := &Config{}
+	t.Setenv("ZEN_ANONYMOUS_KEY", "")
+	if got := empty.ZenAnonymousKey(); got != "" {
+		t.Errorf("unset: got %q, want empty (default)", got)
+	}
+}

@@ -167,6 +167,14 @@ Use the local client key above as the Bearer token for your OpenAI client.
 		zenPool = NewAccountPool(gc.Accounts)
 	}
 	zen := NewZenClientWithPool(zenPool, cfg.GatewayBaseURL(GatewayZen))
+	if k := cfg.ZenAnonymousKey(); k != "" {
+		zen.SetAnonymousKey(k)
+		log.Printf("zen free-tier: using overridden anonymous credential")
+	}
+	if cfg.ZenSkipAnonymousLane() {
+		zen.SkipAnonymousLane()
+		log.Printf("zen free-tier: anonymous lane disabled, serving *-free from keyed accounts only")
+	}
 	reg := NewRegistry(GatewayCmdcode, NewCCGateway(cc), zen)
 	usage := loadUsage()
 

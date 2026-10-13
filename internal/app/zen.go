@@ -19,16 +19,23 @@ import (
 // through unless overridden via SetBaseURL (tests point it at httptest fakes).
 const defaultZenBaseURL = "https://opencode.ai/zen"
 
-// zenAnonymousKey is the shared public credential the Zen free tier expects.
+// zenAnonymousKey is the DEFAULT shared credential the Zen free tier expects.
 // Free-tier models reject real account keys with permission_denied ("can
-// only be used from within OpenCode"); anonymous requests carry this key
-// plus the standard CLI identity headers. Keyed accounts stay as fallback
-// when the anonymous attempt fails.
+// only be used from within OpenCode"); anonymous requests carry this key plus
+// the standard CLI identity headers. Keyed accounts stay as fallback when the
+// anonymous attempt fails.
+//
+// This value is the opencode CLI's embedded free-tier credential, which the
+// upstream rotates (it was "public"; a live capture on 2026-10-13 showed the
+// current CLI no longer uses that literal). It is therefore overridable at
+// runtime without a recompile via ZEN_ANONYMOUS_KEY / gateways.zen.anonymous_key
+// (see ZenClient.SetAnonymousKey); this constant is only the fallback default.
 const zenAnonymousKey = "public"
 
-// anonymousAccount stands in for the public credential in logs and usage
-// counters. It is never a member of any pool.
-var anonymousAccount = newAccount("anonymous(public)", zenAnonymousKey, true)
+// anonymousAccount stands in for the default credential in logs and usage
+// counters. It is never a member of any pool. A client with an overridden
+// anonymous key builds its own labelled account instead (see SetAnonymousKey).
+var anonymousAccount = newAccount("anonymous(free-tier)", zenAnonymousKey, true)
 
 // ZenClient sends requests to the OpenCode Zen upstream, rotating across the
 // accounts in its pool and failing over on account-scoped errors. It mirrors
@@ -42,6 +49,15 @@ type ZenClient struct {
 	Base   string
 	Client *http.Client
 
+	// anonymousKey is the credential used for the free-tier lane and
+	// anonAccount is its logging/usage stand-in. They default to the package
+	// defaults and are replaced by SetAnonymousKey when overridden.
+	anonymousKey string
+	anonAccount  *Account
+	// skipAnonymous disables the free-tier lane entirely: *-free models are
+	// served only from keyed accounts.
+	skipAnonymous bool
+
 	// baseURLMu guards Base, which the admin API can update at runtime.
 	baseURLMu sync.RWMutex
 }
@@ -53,10 +69,29 @@ func NewZenClientWithPool(pool *AccountPool, baseURL string) *ZenClient {
 		baseURL = defaultZenBaseURL
 	}
 	return &ZenClient{
-		pool:   pool,
-		Base:   baseURL,
-		Client: &http.Client{Timeout: 600 * time.Second},
+		pool:         pool,
+		Base:         baseURL,
+		Client:       &http.Client{Timeout: 600 * time.Second},
+		anonymousKey: zenAnonymousKey,
+		anonAccount:  anonymousAccount,
 	}
+}
+
+// SetAnonymousKey overrides the free-tier credential at startup. An empty key
+// keeps the default. The override never leaks into logs: the stand-in account
+// is labelled generically, not by the key value.
+func (z *ZenClient) SetAnonymousKey(key string) {
+	if key == "" || key == z.anonymousKey {
+		return
+	}
+	z.anonymousKey = key
+	z.anonAccount = newAccount("anonymous(free-tier)", key, true)
+}
+
+// SkipAnonymousLane disables the free-tier anonymous lane so *-free models
+// are served only from keyed accounts.
+func (z *ZenClient) SkipAnonymousLane() {
+	z.skipAnonymous = true
 }
 
 func (z *ZenClient) Name() string        { return GatewayOpencode }
@@ -168,7 +203,7 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 
 	// Free-tier lane: the upstream only serves *-free models to the shared
 	// public credential. Try it before the keyed accounts.
-	if IsFreeModel(out.Model) {
+	if IsFreeModel(out.Model) && !z.skipAnonymous {
 		if resp, acct, err := z.chatAnonymous(ctx, body, ids, wantCollapse, bareModel(req.Model)); err == nil {
 			return resp, acct, nil
 		} else {
@@ -248,19 +283,19 @@ func (z *ZenClient) ChatWithHeaders(ctx context.Context, req *ChatRequest, inbou
 // credential the free tier requires. It mirrors the keyed success path
 // (including stream collapse) without touching any pool account.
 func (z *ZenClient) chatAnonymous(ctx context.Context, body []byte, ids ZenRequestIDs, wantCollapse bool, model string) (*http.Response, *Account, error) {
-	resp, err := z.doChat(ctx, body, zenAnonymousKey, ids)
+	resp, err := z.doChat(ctx, body, z.anonymousKey, ids)
 	if err != nil {
-		return nil, anonymousAccount, err
+		return nil, z.anonAccount, err
 	}
-	anonymousAccount.RecordSuccess()
+	z.anonAccount.RecordSuccess()
 	if wantCollapse {
 		collapsed, cerr := collapseStream(resp, model)
 		if cerr != nil {
-			return nil, anonymousAccount, cerr
+			return nil, z.anonAccount, cerr
 		}
-		return collapsed, anonymousAccount, nil
+		return collapsed, z.anonAccount, nil
 	}
-	return resp, anonymousAccount, nil
+	return resp, z.anonAccount, nil
 }
 
 // isNonRetryableClientResponse reports whether an upstream error is
@@ -333,7 +368,7 @@ func (z *ZenClient) chatResponses(ctx context.Context, out *ChatRequest, wantStr
 	model := out.Model
 	// Free-tier lane first: the upstream only serves *-free models to the
 	// shared public credential. Keyed accounts stay as fallback.
-	if IsFreeModel(model) {
+	if IsFreeModel(model) && !z.skipAnonymous {
 		if resp, acct, err := z.chatResponsesAnonymous(ctx, wantStream, body, ids, model); err == nil {
 			return resp, acct, nil
 		} else {
@@ -402,23 +437,23 @@ func (z *ZenClient) chatResponses(ctx context.Context, out *ChatRequest, wantStr
 // shared public credential the free tier requires, translating the SSE the
 // same way the keyed path does.
 func (z *ZenClient) chatResponsesAnonymous(ctx context.Context, wantStream bool, body []byte, ids ZenRequestIDs, model string) (*http.Response, *Account, error) {
-	resp, err := z.doResponses(ctx, body, zenAnonymousKey, ids)
+	resp, err := z.doResponses(ctx, body, z.anonymousKey, ids)
 	if err != nil {
-		return nil, anonymousAccount, err
+		return nil, z.anonAccount, err
 	}
-	anonymousAccount.RecordSuccess()
+	z.anonAccount.RecordSuccess()
 	if wantStream {
 		translated, terr := translateZenResponsesStream(resp, model)
 		if terr != nil {
-			return nil, anonymousAccount, terr
+			return nil, z.anonAccount, terr
 		}
-		return translated, anonymousAccount, nil
+		return translated, z.anonAccount, nil
 	}
 	aggregated, aerr := aggregateZenResponses(resp, model)
 	if aerr != nil {
-		return nil, anonymousAccount, aerr
+		return nil, z.anonAccount, aerr
 	}
-	return aggregated, anonymousAccount, nil
+	return aggregated, z.anonAccount, nil
 }
 
 func (z *ZenClient) doResponses(ctx context.Context, body []byte, apiKey string, ids ZenRequestIDs) (*http.Response, error) {

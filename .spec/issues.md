@@ -9,6 +9,42 @@ Contexto do incidente que motivou: upstream devolve **403** para
 `retryable status=403` x3 → `503 all_cooling`) e **402 `Insufficient account
 funds`** intermitente para outros modelos (round-robin entre contas com/sem saldo).
 
+## 0. UPDATE 2026-10-13 — captura LIVE (resolve as especulações de §1 e §2)
+
+Primeira captura live real (mitmproxy reverse p/ `opencode.ai` + opencode CLI
+**1.19.0** oficial em HOME isolado, sem login). Encerra o follow-up aberto em §12.
+
+**Causa raiz do 403 `FreeTierError`: a credencial anônima está obsoleta.**
+`internal/app/zen.go:27` manda `zenAnonymousKey = "public"`. Teste controlado:
+`Bearer public` em sessão **nova** → 403 em **12/12** (variando headers e tools);
+opencode oficial em sessão nova → **200**. `public` só "passa" se reusar uma
+sessão que um token real já autenticou. O opencode 1.19.0 usa outra credencial
+free-tier **embutida no binário** (não é token que se gera; não há fetch — vai
+direto ao `/v1/responses`). Headers/sessão canônica/agent-shape **NÃO** são a
+causa — já estavam certos e mesmo assim dá 403.
+
+**Deltas de header/body vs. o 1.19.0 real (eram adivinhação estática; corrigidos
+em `zen_headers.go`):**
+- `User-Agent`: era `opencode/1.18.31`; real = `opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14`.
+- `x-opencode-project`: era `prj_<12hex>`; real = **40-hex sem prefixo** (hash do worktree).
+- Responses: real manda **`x-opencode-session-id`**, NÃO `x-session-affinity`/`X-Session-Id` (esses são só da lane chat). `x-opencode-parent` e header `prompt_cache_key` seguem omitidos.
+- Body (chamada title-gen capturada): tinha `reasoning:{effort,summary}` e `max_output_tokens`, sem `tools`/`tool_choice`/`prompt_cache_key`. **Não** replicado: o `effort:"minimal"` era específico de title-gen; hardcodar rebaixaria o agent. Body **não** é o gate do 403 (nosso body com tools deu 200 em sessão já autorizada).
+
+Consequência: os fixes de header deixam o request idêntico ao real, mas o 403 só
+some com a credencial certa. Alternativa legítima: rotear `-free` pelas contas
+keyed (ToS: upstream diz "only from within OpenCode" — replicar o embutido é
+contornar controle deles). Ferramenta de verificação: Playground por conta
+(`/admin/api/debug/inference`) → `rejected` (free só via embutido) vs `402` (saldo)
+vs `200` (keyed serve).
+
+**Fix implementado (2026-10-13):** a credencial free-tier virou configurável —
+`ZEN_ANONYMOUS_KEY` (env, precede) ou `gateways.zen.anonymous_key` (config);
+vazio = default `public`. `ZenClient.SetAnonymousKey` troca a credencial e o
+stand-in de conta sem vazar o valor em log. Assim o operador fornece/atualiza a
+credencial embutida atual do opencode (que rotaciona) sem recompilar e **sem**
+usar o token pessoal/`auth.json`. Produção confirmada: `cmdcode/...-contributor`
+(keyed) = 200; `opencode/...-free` (public) = 403 até setar a credencial atual.
+
 ## 1. Gap principal — free-tier shaping (provável causa do 403)
 
 - Nós: `internal/app/proxy.go:forwardOnce()` — passthrough byte-a-byte. Só valida

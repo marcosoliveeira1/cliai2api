@@ -9,7 +9,7 @@ import (
 var (
 	sesPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
 	msgPattern = regexp.MustCompile(`^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
-	prjPattern = regexp.MustCompile(`^prj_[0-9a-f]{12}$`)
+	prjPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
 func TestCanonicalSessionIDFormat(t *testing.T) {
@@ -37,7 +37,7 @@ func TestCanonicalMessageAndProjectIDFormat(t *testing.T) {
 		t.Fatalf("CanonicalMessageID() = %q, want msg_<12hex><14base62>", got)
 	}
 	if got := CanonicalProjectID(); !prjPattern.MatchString(got) {
-		t.Fatalf("CanonicalProjectID() = %q, want prj_<12hex>", got)
+		t.Fatalf("CanonicalProjectID() = %q, want 40-hex digest", got)
 	}
 }
 
@@ -68,7 +68,7 @@ func TestDeriveZenRequestIDsFresh(t *testing.T) {
 		t.Errorf("RequestID = %q, want canonical msg_ shape", ids.RequestID)
 	}
 	if !prjPattern.MatchString(ids.ProjectID) {
-		t.Errorf("ProjectID = %q, want canonical prj_ shape", ids.ProjectID)
+		t.Errorf("ProjectID = %q, want canonical 40-hex shape", ids.ProjectID)
 	}
 	if ids.ParentID == "" {
 		t.Errorf("ParentID is empty, want a default for the first message")
@@ -133,7 +133,7 @@ func TestSetZenHeadersEmitsCLIIdentity(t *testing.T) {
 		"x-session-affinity": ids.SessionID,
 		"X-Session-Id":       ids.SessionID,
 		"prompt_cache_key":   "zen:" + ids.SessionID,
-		"User-Agent":         "opencode/" + zenCLIVersion,
+		"User-Agent":         zenUserAgent,
 	}
 	for k, v := range want {
 		if h.Get(k) != v {
@@ -182,15 +182,19 @@ func TestSetZenResponsesHeadersPreservesOpenCodeIdentity(t *testing.T) {
 	for k, want := range map[string]string{
 		"x-opencode-org-id": "wrk_example", "x-opencode-project": "project-from-caller",
 		"x-opencode-session": "session-from-caller", "x-opencode-request": "request-from-caller",
-		"x-session-affinity": "session-from-caller", "X-Session-Id": "session-from-caller",
-		"User-Agent": inbound.Get("User-Agent"), "Authorization": "Bearer zen-key",
+		"x-opencode-session-id": "session-from-caller",
+		"User-Agent":            inbound.Get("User-Agent"), "Authorization": "Bearer zen-key",
 	} {
 		if got := h.Get(k); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
 	}
-	if h.Get("x-opencode-parent") != "" || h.Get("prompt_cache_key") != "" {
-		t.Errorf("Responses headers include chat-only values: %+v", h)
+	// The Responses lane uses x-opencode-session-id only; the chat-lane
+	// aliases, x-opencode-parent and the cache-key header must not appear.
+	for _, k := range []string{"x-session-affinity", "X-Session-Id", "x-opencode-parent", "prompt_cache_key"} {
+		if h.Get(k) != "" {
+			t.Errorf("Responses headers include unexpected %s: %q", k, h.Get(k))
+		}
 	}
 }
 

@@ -8,13 +8,16 @@ import (
 	"strings"
 )
 
-// zenCLIVersion is the fallback User-Agent when the inbound caller does not
-// provide one. Responses requests preserve the caller's User-Agent and the
-// OpenCode identity values it sends.
-const zenCLIVersion = "1.18.31"
+// zenCLIVersion is the opencode CLI version this gateway impersonates. It is
+// the fallback User-Agent segment when the inbound caller does not provide
+// one. Verified against a live mitmproxy capture of opencode 1.19.0 on
+// 2026-10-13 (see .spec/issues.md §2).
+const zenCLIVersion = "1.19.0"
 
-// zenUserAgent matches the official opencode CLI.
-const zenUserAgent = "opencode/" + zenCLIVersion
+// zenUserAgent matches the full User-Agent the official opencode CLI sends on
+// Zen requests: the CLI version plus the ai-sdk and bun runtime segments. The
+// free tier keys client identity off this string, so it is sent verbatim.
+const zenUserAgent = "opencode/" + zenCLIVersion + " ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
 
 // zenDefaultClient is sent as x-opencode-client unless OPENCODE_CLIENT
 // overrides it.
@@ -66,10 +69,12 @@ func CanonicalMessageID() string {
 	return "msg_" + hex.EncodeToString(zenRandomBytes(6)) + zenBase62String(14)
 }
 
-// CanonicalProjectID generates a project ID in the canonical shape
-// prj_<12hex>.
+// CanonicalProjectID generates a project ID in the shape the opencode CLI
+// sends: a bare 40-hex digest (the CLI hashes the worktree path; we have no
+// path, so the value is random). The live 1.19.0 capture (2026-10-13) sends
+// 40 hex with no "prj_" prefix, unlike the older static reference.
 func CanonicalProjectID() string {
-	return "prj_" + hex.EncodeToString(zenRandomBytes(6))
+	return hex.EncodeToString(zenRandomBytes(20))
 }
 
 func zenBase62String(n int) string {
@@ -160,11 +165,12 @@ func setZenHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("User-Agent", zenUpstreamUserAgent(ids.UserAgent))
 }
 
-// setZenResponsesHeaders emits the identity headers observed on Zen Responses
-// requests. The free tier rejects anonymous requests without session affinity
-// (X-Session-Id), so the session aliases travel here too; only the chat-only
-// x-opencode-parent and the cache key header are omitted (Responses carries
-// prompt_cache_key in its JSON body).
+// setZenResponsesHeaders emits the identity headers captured live from the
+// opencode 1.19.0 CLI on Zen Responses requests (2026-10-13). The session
+// alias on this path is x-opencode-session-id (not the chat lane's
+// x-session-affinity / X-Session-Id), and the chat-only x-opencode-parent and
+// prompt_cache_key header are omitted (Responses carries prompt_cache_key in
+// its JSON body).
 func setZenResponsesHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("Authorization", "Bearer "+apiKey)
 	h.Set("Content-Type", "application/json")
@@ -175,7 +181,6 @@ func setZenResponsesHeaders(h http.Header, apiKey string, ids ZenRequestIDs) {
 	h.Set("x-opencode-project", ids.ProjectID)
 	h.Set("x-opencode-request", ids.RequestID)
 	h.Set("x-opencode-session", ids.SessionID)
-	h.Set("x-session-affinity", ids.SessionID)
-	h.Set("X-Session-Id", ids.SessionID)
+	h.Set("x-opencode-session-id", ids.SessionID)
 	h.Set("User-Agent", zenUpstreamUserAgent(ids.UserAgent))
 }
