@@ -199,6 +199,7 @@ func runServer(reg *Registry, cfg *Config, usage *UsageTracker, ring *logRing) e
 	})
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions(reg, cfg, usage))
 	mux.HandleFunc("/v1/models", handleModels(cfg))
+	mux.HandleFunc("/v1/systemone", handleSystemOne(cc, usage))
 	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(usage.Snapshot())

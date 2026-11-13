@@ -202,7 +202,12 @@ func (c *CCClient) Send(ctx context.Context, req *ChatRequest) (*http.Response, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal cc request: %w", err)
 	}
+	return c.postWithFailover(ctx, "/alpha/generate", body)
+}
 
+// postWithFailover POSTs body to path, rotating across the pool with the
+// failover rules described on Send.
+func (c *CCClient) postWithFailover(ctx context.Context, path string, body []byte) (*http.Response, *Account, error) {
 	pool := c.pool()
 	attempts := pool.EnabledCount()
 	if attempts == 0 {
@@ -223,7 +228,7 @@ func (c *CCClient) Send(ctx context.Context, req *ChatRequest) (*http.Response, 
 			break
 		}
 		lastAcct = acct
-		resp, err := c.doSend(ctx, body, acct.APIKey)
+		resp, err := c.doPost(ctx, path, body, acct.APIKey)
 		if err == nil {
 			acct.RecordSuccess()
 			return resp, acct, nil
@@ -287,8 +292,8 @@ func setCCHeaders(h http.Header, apiKey string) {
 	h.Set("User-Agent", ccUserAgent)
 }
 
-func (c *CCClient) doSend(ctx context.Context, body []byte, apiKey string) (*http.Response, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURLValue()+"/alpha/generate", bytes.NewReader(body))
+func (c *CCClient) doPost(ctx context.Context, path string, body []byte, apiKey string) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURLValue()+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
