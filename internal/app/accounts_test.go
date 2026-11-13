@@ -173,6 +173,16 @@ func TestAccountRecordFailureTracksAuthFailures(t *testing.T) {
 	}
 }
 
+func TestAccountRecordFailureIgnoresPlanGate(t *testing.T) {
+	a := newAccount("x", "key-x", true)
+	for i := 0; i < authErrorThreshold; i++ {
+		a.RecordFailure(&upstreamAPIError{Status: http.StatusForbidden, Code: "upgrade_required", Message: "Your Go plan doesn't include API access."})
+	}
+	if view := a.View(); view.AuthFailures != 0 || view.Status != "ok" {
+		t.Fatalf("view = %+v, want ok with no auth failures", view)
+	}
+}
+
 func TestAccountPoolConfigRoundTrip(t *testing.T) {
 	pool := poolWithKeys("key-a", "key-b")
 	pool.SetEnabled(accountID("key-b"), false)

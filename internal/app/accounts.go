@@ -106,6 +106,8 @@ func (a *Account) RecordFailure(err error) {
 				cooldown = time.Duration(seconds) * time.Second
 			}
 			a.rateLimitedUntil = now.Add(cooldown)
+		case upstreamErr.Code == "upgrade_required":
+			// Plan gate (e.g. /provider/* on a Go plan): the key itself is fine.
 		case upstreamErr.Status == http.StatusUnauthorized || upstreamErr.Status == http.StatusForbidden:
 			a.authFailures++
 		}
