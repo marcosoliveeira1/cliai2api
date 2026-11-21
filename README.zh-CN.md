@@ -232,6 +232,7 @@ POST   /admin/api/quotas/refresh       202 立即返回并在后台刷新全部�
 GET    /admin/api/models
 PUT    /admin/api/models               {"exposed": ["model-id", ...]}
 GET    /admin/api/keys
+GET    /admin/api/usage/history        按天历史用量：?period=billing | ?days=N（默认 30）| ?from=YYYY-MM-DD&to=…；&group=key,model,gateway,day
 POST   /admin/api/keys                 {"name": "..."} — 密钥值一律由服务端生成，不接受指定
 GET    /admin/api/keys/{id}/reveal
 PATCH  /admin/api/keys/{id}            {"enabled": true} 或 {"name": "..."}

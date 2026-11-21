@@ -91,15 +91,21 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 			return
 		}
 
-		log.Printf("[INFO] chat completions model=%q gateway=%s account=%q", req.Model, gateway.Name(), accountLogName(acct))
+		keyName := clientKeyNameFrom(r.Context())
+		log.Printf("[INFO] chat completions key=%q model=%q gateway=%s account=%q", keyName, req.Model, gateway.Name(), accountLogName(acct))
 
+		recorder := &loggedUsageRecorder{
+			inner:   usage.RequestRecorder(gateway.Name(), acct, clientKeyIDFrom(r.Context()), req.Model),
+			keyName: keyName,
+			model:   req.Model,
+		}
 		if gateway.Name() == GatewayOpencode {
-			handleOpenAIResponse(w, resp, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())))
+			handleOpenAIResponse(w, resp, recorder)
 		} else if req.Stream {
 			includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
-			handleStreamWithOptions(w, resp, req.Model, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())), cfg, includeUsage)
+			handleStreamWithOptions(w, resp, req.Model, recorder, cfg, includeUsage)
 		} else {
-			handleNonStream(w, resp, req.Model, usage.RecorderForGateway(gateway.Name(), acct, clientKeyIDFrom(r.Context())), cfg)
+			handleNonStream(w, resp, req.Model, recorder, cfg)
 		}
 		if err := usage.save(); err != nil {
 			log.Printf("%s save usage failed: %v", colorize("[ERROR]", ansiRed), err)
@@ -115,10 +121,12 @@ func handleOpenAIResponse(w http.ResponseWriter, resp *http.Response, usage usag
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.WriteHeader(resp.StatusCode)
+	var sniffer openAIUsageSniffer
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			sniffer.Write(buf[:n])
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
 				log.Printf("[ERROR] relay zen response: %v", writeErr)
 				break
@@ -135,7 +143,8 @@ func handleOpenAIResponse(w http.ResponseWriter, resp *http.Response, usage usag
 			break
 		}
 	}
-	usage.Record(0, 0, 0, 0)
+	prompt, completion, cacheRead := sniffer.Usage()
+	usage.Record(prompt, completion, cacheRead, 0)
 }
 
 func handleStream(w http.ResponseWriter, resp *http.Response, model string, usage *UsageTracker, cfg *Config) {

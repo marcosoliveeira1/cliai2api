@@ -16,7 +16,7 @@
 - Embedded single-file WebUI: usage dashboard, account/key management, model exposure editor, live settings, and log tail
 - Browser OAuth helper for obtaining a Command Code API key (CLI or WebUI); each OAuth run adds an account
 - Local bearer-token auth for clients (`POST /v1/chat/completions` and all other API routes; `GET /v1/models` is intentionally public in this fork), separate admin password for the WebUI
-- Usage counters (global, per-account, per-client-key) and cached quota snapshots persisted to `usage.json`
+- Usage counters (global, per-account, per-client-key), a per-day history by client key + model (120 days), and cached quota snapshots persisted to `usage.json`
 - Base64 `image_url` conversion to Command Code image blocks; CORS enabled for local UI clients
 - `GET /health` and `GET /usage` endpoints
 
@@ -210,6 +210,8 @@ Every chat request is sent with the next enabled account in round-robin order. W
 
 - Create keys in the WebUI's **Keys** tab — values are always server-generated (`ccgw-` prefix) and never accepted from input; keys can be enabled/disabled, copied, and deleted.
 - Each key gets independent request and token counters, persisted in `usage.json` under `client_keys` and visible at `/usage`.
+- Every chat/System One request also lands in a per-UTC-day bucket keyed by client key + gateway + model (`usage.json` → `history`, kept for 120 days, admin-only). The Keys tab's **Usage by period** panel and `GET /admin/api/usage/history` sum any window, so "who spent this billing period?" has an answer — the upstream only reports an account-wide total. Zen usage is read from the relayed response (`usage` in the final SSE chunk or JSON body).
+- Each finished request logs `usage key="<name>" model="…" prompt=… completion=… cache_read=…` (Logs tab).
 - Keys are masked in the list; reveal or copy them on demand — the full value is shown once at creation and available via the reveal endpoint.
 - The legacy single `api_key` field keeps working and migrates to one key named `default` on load.
 
@@ -263,6 +265,7 @@ POST   /admin/api/quotas/refresh       202 + background refresh of every account
 GET    /admin/api/models
 PUT    /admin/api/models               {"exposed": ["model-id", ...]}
 GET    /admin/api/keys
+GET    /admin/api/usage/history        ?period=billing | ?days=N (default 30) | ?from=YYYY-MM-DD&to=…; &group=key,model,gateway,day
 POST   /admin/api/keys                 {"name": "..."} — the key value is always server-generated
 GET    /admin/api/keys/{id}/reveal
 PATCH  /admin/api/keys/{id}            {"enabled": true} or {"name": "..."}

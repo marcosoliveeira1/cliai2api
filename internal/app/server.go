@@ -24,13 +24,23 @@ var serverStartedAt = time.Now()
 // contexts.
 type ctxKey int
 
-const ctxKeyClientKeyID ctxKey = iota
+const (
+	ctxKeyClientKeyID ctxKey = iota
+	ctxKeyClientKeyName
+)
 
 // clientKeyID returns the authenticated client key ID stored by
 // authMiddleware, or "".
 func clientKeyIDFrom(ctx context.Context) string {
 	id, _ := ctx.Value(ctxKeyClientKeyID).(string)
 	return id
+}
+
+// clientKeyNameFrom returns the authenticated client key's display name, or
+// "" when the request carries no client key.
+func clientKeyNameFrom(ctx context.Context) string {
+	name, _ := ctx.Value(ctxKeyClientKeyName).(string)
+	return name
 }
 
 func authMiddleware(cfg *Config, keys *ClientKeyPool) func(http.Handler) http.Handler {
@@ -64,6 +74,7 @@ func authMiddleware(cfg *Config, keys *ClientKeyPool) func(http.Handler) http.Ha
 			}
 			ck.RecordUsed()
 			ctx := context.WithValue(r.Context(), ctxKeyClientKeyID, ck.ID)
+			ctx = context.WithValue(ctx, ctxKeyClientKeyName, ck.Name)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

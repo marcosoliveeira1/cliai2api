@@ -32,6 +32,9 @@ type UsageTracker struct {
 	// quotas caches the latest fetched quota snapshot per account ID; the
 	// entries are replaced wholesale and never mutated in place.
 	quotas map[string]*QuotaSnapshot
+	// history holds per-UTC-day counters keyed by usageHistoryKey (client key
+	// + gateway + model); see usage_history.go. Guarded by accMu.
+	history map[string]map[string]*UsageCounters
 }
 
 type UsageCounters struct {
@@ -152,10 +155,26 @@ func (u *UsageTracker) RecorderWithGateway(gateway, accountID, clientKeyID strin
 	return &mirrorUsageRecorder{tracker: u, accountID: u.accountKeyFor(gateway, accountID), clientKeyID: clientKeyID}
 }
 
+// RequestRecorder is RecorderForGateway plus the per-day history: every
+// recorded request also lands in today's bucket for (client key, gateway,
+// model), which is what lets the admin API attribute a billing period.
+func (u *UsageTracker) RequestRecorder(gateway string, a *Account, clientKeyID, model string) usageRecorder {
+	r := &mirrorUsageRecorder{tracker: u, clientKeyID: clientKeyID, history: true, gateway: gateway, model: model}
+	if a != nil {
+		r.accountID = u.accountKeyFor(gateway, a.ID)
+	}
+	return r
+}
+
 type mirrorUsageRecorder struct {
 	tracker     *UsageTracker
 	accountID   string
 	clientKeyID string
+
+	// history enables the per-day bucket (RequestRecorder only).
+	history bool
+	gateway string
+	model   string
 }
 
 func (r *mirrorUsageRecorder) Record(prompt, completion, cacheRead, cacheWrite int) {
@@ -177,6 +196,9 @@ func (r *mirrorUsageRecorder) Record(prompt, completion, cacheRead, cacheWrite i
 	}
 	if c := r.tracker.clientKeyCounter(r.clientKeyID); c != nil {
 		c.add(prompt, completion, cacheRead, cacheWrite)
+	}
+	if r.history {
+		r.tracker.recordHistory(r.clientKeyID, r.gateway, r.model, prompt, completion, cacheRead, cacheWrite)
 	}
 }
 
@@ -432,6 +454,8 @@ type UsageSnapshotEntry struct {
 type persistedUsage struct {
 	UsageSnapshot
 	Quotas map[string]*QuotaSnapshot `json:"quotas,omitempty"`
+	// History is admin-only too: day → usageHistoryKey → counters.
+	History map[string]map[string]UsageSnapshotEntry `json:"history,omitempty"`
 }
 
 // TotalTokens returns prompt + completion (not counting cache separately)
@@ -488,6 +512,7 @@ func loadUsage() *UsageTracker {
 	for id, q := range snap.Quotas {
 		u.quotas[id] = q
 	}
+	u.restoreHistoryLocked(snap.History)
 	u.accMu.Unlock()
 	return u
 }
@@ -496,7 +521,7 @@ func (u *UsageTracker) save() error {
 	u.saveMu.Lock()
 	defer u.saveMu.Unlock()
 
-	snap := persistedUsage{UsageSnapshot: u.Snapshot(), Quotas: u.quotaSnapshot()}
+	snap := persistedUsage{UsageSnapshot: u.Snapshot(), Quotas: u.quotaSnapshot(), History: u.historySnapshot()}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return err

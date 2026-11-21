@@ -166,13 +166,13 @@ func handleSystemOne(cc *CCClient, usage *UsageTracker) http.HandlerFunc {
 			writeError(w, http.StatusBadGateway, "server_error", "read upstream response: "+err.Error())
 			return
 		}
-		log.Printf("[INFO] systemone model=%q account=%q questions=%d", model, accountLogName(acct), len(req.Questions))
+		log.Printf("[INFO] systemone key=%q model=%q account=%q questions=%d", clientKeyNameFrom(r.Context()), model, accountLogName(acct), len(req.Questions))
 
 		var parsed struct {
 			Usage systemOneUsage `json:"usage"`
 		}
 		if json.Unmarshal(out, &parsed) == nil {
-			usage.RecorderForGateway(GatewayCmdcode, acct, clientKeyIDFrom(r.Context())).Record(parsed.Usage.InputTokens, parsed.Usage.OutputTokens, 0, 0)
+			usage.RequestRecorder(GatewayCmdcode, acct, clientKeyIDFrom(r.Context()), "systemone/"+model).Record(parsed.Usage.InputTokens, parsed.Usage.OutputTokens, 0, 0)
 			if err := usage.save(); err != nil {
 				log.Printf("%s save usage failed: %v", colorize("[ERROR]", ansiRed), err)
 			}

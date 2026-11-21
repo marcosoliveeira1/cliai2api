@@ -384,6 +384,30 @@
       <h3 data-i18n="keys.listTitle">Key list</h3>
       <div id="ck-table"></div>
     </div>
+    <div class="panel">
+      <h3 data-i18n="keys.usageTitle">Usage by period</h3>
+      <div class="form-row">
+        <label class="field"><span class="cap" data-i18n="keys.usageWindow">Window</span>
+          <select id="ku-window">
+            <option value="period=billing" data-i18n="keys.usageBilling">Current billing period</option>
+            <option value="days=1" data-i18n="keys.usageToday">Today (UTC)</option>
+            <option value="days=7" data-i18n="keys.usage7d">Last 7 days</option>
+            <option value="days=30" data-i18n="keys.usage30d">Last 30 days</option>
+          </select>
+        </label>
+        <label class="field"><span class="cap" data-i18n="keys.usageGroup">Group by</span>
+          <select id="ku-group">
+            <option value="key" data-i18n="keys.usageByKey">Key</option>
+            <option value="key,model" data-i18n="keys.usageByKeyModel">Key + model</option>
+            <option value="model" data-i18n="keys.usageByModel">Model</option>
+            <option value="day" data-i18n="keys.usageByDay">Day</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint" id="ku-range"></p>
+      <div id="ku-table"></div>
+      <p class="hint" data-i18n="keys.usageHint">History is kept per UTC day for 120 days. Input includes cached tokens; the share column is input + output over the window total.</p>
+    </div>
   </section>
 
   <!-- settings -->
@@ -705,6 +729,28 @@ const I18N = {
     "keys.confirmDelete": "Delete key \"{name}\"? Clients using it lose access immediately.",
     "keys.deleted": "Key deleted.",
     "keys.copied": "Key copied.",
+    "keys.usageTitle": "Usage by period",
+    "keys.usageWindow": "Window",
+    "keys.usageBilling": "Current billing period",
+    "keys.usageToday": "Today (UTC)",
+    "keys.usage7d": "Last 7 days",
+    "keys.usage30d": "Last 30 days",
+    "keys.usageGroup": "Group by",
+    "keys.usageByKey": "Key",
+    "keys.usageByKeyModel": "Key + model",
+    "keys.usageByModel": "Model",
+    "keys.usageByDay": "Day",
+    "keys.usageRange": "{from} → {to} (UTC days)",
+    "keys.usageRangeBilling": "{from} → {to} (UTC days) · period started {start}",
+    "keys.usageEmpty": "No usage recorded in this window yet",
+    "keys.usageHint": "History is kept per UTC day for 120 days. Input includes cached tokens; the share column is input + output over the window total.",
+    "keys.usageInput": "Input",
+    "keys.usageCache": "Cache read",
+    "keys.usageOutput": "Output",
+    "keys.usageShare": "Share",
+    "keys.usageModel": "Model",
+    "keys.usageDay": "Day",
+    "keys.usageTotal": "Total",
 
     "set.upstream": "Upstream",
     "set.baseUrl": "Base URL (applies immediately)",
@@ -917,6 +963,28 @@ const I18N = {
     "keys.confirmDelete": "确定删除密钥「{name}」？使用它的客户端将立即失去访问权限。",
     "keys.deleted": "密钥已删除",
     "keys.copied": "密钥已复制",
+    "keys.usageTitle": "按时间段统计用量",
+    "keys.usageWindow": "时间范围",
+    "keys.usageBilling": "当前计费周期",
+    "keys.usageToday": "今天（UTC）",
+    "keys.usage7d": "最近 7 天",
+    "keys.usage30d": "最近 30 天",
+    "keys.usageGroup": "分组方式",
+    "keys.usageByKey": "密钥",
+    "keys.usageByKeyModel": "密钥 + 模型",
+    "keys.usageByModel": "模型",
+    "keys.usageByDay": "日期",
+    "keys.usageRange": "{from} → {to}（UTC 日期）",
+    "keys.usageRangeBilling": "{from} → {to}（UTC 日期）· 周期开始于 {start}",
+    "keys.usageEmpty": "该时间段内暂无用量记录",
+    "keys.usageHint": "历史用量按 UTC 日期保存 120 天。输入包含缓存命中的 tokens；占比为输入 + 输出占该时间段总量的比例。",
+    "keys.usageInput": "输入",
+    "keys.usageCache": "缓存命中",
+    "keys.usageOutput": "输出",
+    "keys.usageShare": "占比",
+    "keys.usageModel": "模型",
+    "keys.usageDay": "日期",
+    "keys.usageTotal": "合计",
 
     "set.upstream": "上游",
     "set.baseUrl": "Base URL（即时生效）",
@@ -1014,6 +1082,7 @@ function rerenderDynamic() {
   if (state.token) refreshAll(); // overview cards + account table
   if (state.models.length) renderModels();
   if (state.keys) renderKeys(state.keys);
+  if (state.keyUsage) renderKeyUsage(state.keyUsage);
   renderRestartNote();
   if (state.tab === "logs") {
     state.logsSeq = 0;
@@ -1631,6 +1700,70 @@ async function loadKeys() {
     state.keys = r.keys || [];
     renderKeys(state.keys);
   } catch (e) { /* 401 already handled */ }
+  loadKeyUsage();
+}
+
+/* ---------- usage by period ---------- */
+
+async function loadKeyUsage() {
+  const params = $("#ku-window").value + "&group=" + encodeURIComponent($("#ku-group").value);
+  try {
+    state.keyUsage = await api("/admin/api/usage/history?" + params);
+  } catch (e) {
+    if (e.message === "unauthorized") return;
+    state.keyUsage = { error: e.message };
+  }
+  renderKeyUsage(state.keyUsage);
+}
+
+function renderKeyUsage(u) {
+  if (!u) return;
+  if (u.error) {
+    $("#ku-range").textContent = "";
+    $("#ku-table").innerHTML = `<div class="empty">${esc(u.error)}</div>`;
+    return;
+  }
+  $("#ku-range").textContent = u.period_start
+    ? t("keys.usageRangeBilling", { from: u.from, to: u.to, start: new Date(u.period_start).toLocaleString(locale()) })
+    : t("keys.usageRange", { from: u.from, to: u.to });
+  const rows = u.rows || [];
+  if (!rows.length) {
+    $("#ku-table").innerHTML = `<div class="empty">${esc(t("keys.usageEmpty"))}</div>`;
+    return;
+  }
+  const groups = (u.group || "key").split(",");
+  const has = g => groups.includes(g);
+  const total = u.total || {};
+  const grand = (total.prompt_tokens || 0) + (total.completion_tokens || 0);
+  const share = r => grand ? (((r.prompt_tokens || 0) + (r.completion_tokens || 0)) * 100 / grand).toFixed(1) + "%" : "—";
+  const num = v => `<td class="num" style="text-align:right">${v}</td>`;
+  const dims = r => [
+    has("day") ? `<td class="nowrap mono">${esc(r.day)}</td>` : "",
+    has("key") ? `<td><strong>${esc(r.key_name || r.key_id)}</strong></td>` : "",
+    has("gateway") ? `<td>${esc(r.gateway)}</td>` : "",
+    has("model") ? `<td class="mono">${esc(r.model)}</td>` : "",
+  ].join("");
+  const metrics = r => num(fmtInt(r.requests)) + num(fmtTokens(r.prompt_tokens)) + num(fmtTokens(r.cache_read_tokens)) +
+    num(fmtTokens(r.completion_tokens)) + num(esc(share(r)));
+  const dimCount = groups.filter(g => ["day", "key", "gateway", "model"].includes(g)).length;
+  $("#ku-table").innerHTML = `
+  <table>
+    <thead><tr>
+      ${has("day") ? `<th>${esc(t("keys.usageDay"))}</th>` : ""}
+      ${has("key") ? `<th>${esc(t("common.name"))}</th>` : ""}
+      ${has("gateway") ? `<th>Gateway</th>` : ""}
+      ${has("model") ? `<th>${esc(t("keys.usageModel"))}</th>` : ""}
+      <th style="text-align:right">${esc(t("common.requests"))}</th>
+      <th style="text-align:right">${esc(t("keys.usageInput"))}</th>
+      <th style="text-align:right">${esc(t("keys.usageCache"))}</th>
+      <th style="text-align:right">${esc(t("keys.usageOutput"))}</th>
+      <th style="text-align:right">${esc(t("keys.usageShare"))}</th>
+    </tr></thead>
+    <tbody>
+      ${rows.map(r => `<tr>${dims(r)}${metrics(r)}</tr>`).join("")}
+      <tr class="dim"><td colspan="${Math.max(dimCount, 1)}"><strong>${esc(t("keys.usageTotal"))}</strong></td>${metrics(total)}</tr>
+    </tbody>
+  </table>`;
 }
 
 async function addKey() {
@@ -1850,6 +1983,8 @@ function closeOAuth() {
 $("#login-form").addEventListener("submit", e => { e.preventDefault(); tryConnect(); });
 $("#login-base").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); $("#login-token").focus(); } });
 $("#logout-btn").addEventListener("click", () => logout());
+$("#ku-window").addEventListener("change", () => loadKeyUsage());
+$("#ku-group").addEventListener("change", () => loadKeyUsage());
 
 document.querySelectorAll("select.lang-select").forEach(sel =>
   sel.addEventListener("change", () => setLang(sel.value)));

@@ -42,6 +42,13 @@ var translations = map[Lang]map[string]string{
 		// request bodies
 		"request body is required": "请求体不能为空",
 
+		// usage history
+		"group must be a comma-separated list of key, model, gateway, day": "group 必须是以逗号分隔的 key、model、gateway、day 组合",
+		"period must be billing": "period 只能是 billing",
+		"no billing period known yet; refresh the account quota first": "尚未获取计费周期，请先刷新账号额度",
+		"from/to must be YYYY-MM-DD":                                   "from/to 必须是 YYYY-MM-DD 格式",
+		"days must be between 1 and 120":                               "days 必须在 1 到 120 之间",
+
 		// accounts
 		"account not found":                       "账号不存在",
 		"api_key is required":                     "api_key 不能为空",
