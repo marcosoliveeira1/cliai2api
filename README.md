@@ -231,6 +231,7 @@ Tabs:
 - **Accounts** — add (paste a key, or run OAuth and paste the redirect link when the browser cannot reach the server), edit name/key, enable/disable, connectivity test, quota refresh, delete; per-account requests, tokens, errors, cooldown state, last error, and quota. OAuth-added accounts are named after the Command Code user automatically
 - **Models** — checkbox list of upstream models; checked = exposed via `/v1/models` and callable, unchecked = hidden. This is the editor for `exclude_models` and applies live
 - **Keys** — create local client API keys, enable/disable, copy, delete; per-key usage (see [Client keys](#client-keys))
+- **Usage** — provider-console-style dashboard over the per-day history: totals, top key and billing-period credits, a daily stacked chart by client key (hover for the breakdown, table view included) and a by-model chart; window (billing period / 7 / 30 / 90 days) and metric (tokens, requests, input, output) selectors
 - **Settings** — edit `base_url` (live), `host`/`port`/`webui` (persisted, applied on restart), and change the admin password (requires the current password; every existing admin session is kicked afterwards)
 - **Logs** — tail of the in-memory log ring (last 500 lines)
 
