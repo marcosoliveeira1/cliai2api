@@ -39,7 +39,7 @@ func registerAdminRoutes(mux *http.ServeMux, cc *CCClient, pool *AccountPool, ke
 	mux.HandleFunc("GET /admin/api/models", handleAdminModelsGet(cfg))
 	mux.HandleFunc("PUT /admin/api/models", handleAdminModelsPut(cfg))
 	mux.HandleFunc("GET /admin/api/keys", handleAdminKeysList(keys, usage))
-	mux.HandleFunc("GET /admin/api/usage/history", handleAdminUsageHistory(pool, keys, usage))
+	mux.HandleFunc("GET /admin/api/usage/history", handleAdminUsageHistory(pool, keys, usage, zenPool))
 	mux.HandleFunc("POST /admin/api/keys", handleAdminKeyAdd(keys, cfg, usage))
 	mux.HandleFunc("PATCH /admin/api/keys/{id}", handleAdminKeyPatch(keys, cfg, usage))
 	mux.HandleFunc("DELETE /admin/api/keys/{id}", handleAdminKeyDelete(keys, cfg, usage))

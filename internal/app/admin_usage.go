@@ -17,14 +17,15 @@ const usageHistoryMaxDays = usageHistoryRetentionDays
 //   - from=YYYY-MM-DD[&to=YYYY-MM-DD] — explicit range (to defaults to today)
 //   - days=N — the last N days including today (default 30)
 //
-// group=key,model,gateway,day (any combination; default key) picks the
-// dimensions kept in each row.
-func handleAdminUsageHistory(pool *AccountPool, keys *ClientKeyPool, usage *UsageTracker) http.HandlerFunc {
+// group=key,model,gateway,day,account (any combination; default key) picks the
+// dimensions kept in each row. account is the upstream account that served the
+// request ("-" for history recorded before accounts were tracked).
+func handleAdminUsageHistory(pool *AccountPool, keys *ClientKeyPool, usage *UsageTracker, extra ...*AccountPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		group, ok := parseUsageHistoryGroup(q.Get("group"))
 		if !ok {
-			writeAdminError(w, r, http.StatusBadRequest, "group must be a comma-separated list of key, model, gateway, day")
+			writeAdminError(w, r, http.StatusBadRequest, "group must be a comma-separated list of key, model, gateway, day, account")
 			return
 		}
 
@@ -75,6 +76,12 @@ func handleAdminUsageHistory(pool *AccountPool, keys *ClientKeyPool, usage *Usag
 				rows[i].KeyName = clientKeyDisplayName(keys, rows[i].ClientKeyID)
 			}
 		}
+		if group.Account {
+			pools := append([]*AccountPool{pool}, extra...)
+			for i := range rows {
+				rows[i].AccountName = accountDisplayName(pools, rows[i].AccountID)
+			}
+		}
 		resp := map[string]any{
 			"from":           from,
 			"to":             to,
@@ -123,6 +130,23 @@ func billingPeriodStart(pool *AccountPool, usage *UsageTracker) *time.Time {
 // half, otherwise the window begins the next day.
 func billingPeriodFirstDay(start time.Time) string {
 	return usageDay(start.UTC().Add(12 * time.Hour))
+}
+
+// accountDisplayName resolves a history account ID to its current name,
+// searching every gateway's pool.
+func accountDisplayName(pools []*AccountPool, id string) string {
+	if id == unknownHistoryAccount || id == "" {
+		return "(unknown account)"
+	}
+	for _, p := range pools {
+		if p == nil {
+			continue
+		}
+		if a := p.Get(id); a != nil {
+			return a.Name
+		}
+	}
+	return "(deleted account)"
 }
 
 // clientKeyDisplayName resolves a history key ID to its current name.

@@ -162,6 +162,7 @@ func (u *UsageTracker) RequestRecorder(gateway string, a *Account, clientKeyID, 
 	r := &mirrorUsageRecorder{tracker: u, clientKeyID: clientKeyID, history: true, gateway: gateway, model: model}
 	if a != nil {
 		r.accountID = u.accountKeyFor(gateway, a.ID)
+		r.historyAccountID = a.ID
 	}
 	return r
 }
@@ -172,9 +173,10 @@ type mirrorUsageRecorder struct {
 	clientKeyID string
 
 	// history enables the per-day bucket (RequestRecorder only).
-	history bool
-	gateway string
-	model   string
+	history          bool
+	gateway          string
+	model            string
+	historyAccountID string
 }
 
 func (r *mirrorUsageRecorder) Record(prompt, completion, cacheRead, cacheWrite int) {
@@ -198,7 +200,7 @@ func (r *mirrorUsageRecorder) Record(prompt, completion, cacheRead, cacheWrite i
 		c.add(prompt, completion, cacheRead, cacheWrite)
 	}
 	if r.history {
-		r.tracker.recordHistory(r.clientKeyID, r.gateway, r.model, prompt, completion, cacheRead, cacheWrite)
+		r.tracker.recordHistory(r.clientKeyID, r.gateway, r.model, r.historyAccountID, prompt, completion, cacheRead, cacheWrite)
 	}
 }
 

@@ -31,22 +31,28 @@ func usageDay(t time.Time) string { return t.UTC().Format(usageDayLayout) }
 // (e.g. internal calls); it can never collide with a real "k…" key ID.
 const noClientKey = "-"
 
+// unknownHistoryAccount groups history recorded before the account dimension
+// existed (or without an account), so it can never collide with a real ID.
+const unknownHistoryAccount = "-"
+
 // usageHistoryKey joins the history dimensions. "|" never appears in client
-// key IDs or gateway names; it is replaced in model IDs defensively so the key
-// always splits back into exactly three parts.
-func usageHistoryKey(clientKeyID, gateway, model string) string {
+// key IDs, gateway names or account IDs; it is replaced in model IDs
+// defensively so the key always splits back into its parts. The upstream
+// account is the 4th part: entries persisted before it existed have only three
+// parts and read back with an empty account.
+func usageHistoryKey(clientKeyID, gateway, model, accountID string) string {
 	if clientKeyID == "" {
 		clientKeyID = noClientKey
 	}
-	return clientKeyID + "|" + gateway + "|" + strings.ReplaceAll(model, "|", "/")
+	return clientKeyID + "|" + gateway + "|" + strings.ReplaceAll(model, "|", "/") + "|" + accountID
 }
 
-func usageHistorySplit(key string) (clientKeyID, gateway, model string) {
-	parts := strings.SplitN(key, "|", 3)
-	for len(parts) < 3 {
+func usageHistorySplit(key string) (clientKeyID, gateway, model, accountID string) {
+	parts := strings.SplitN(key, "|", 4)
+	for len(parts) < 4 {
 		parts = append(parts, "")
 	}
-	return parts[0], parts[1], parts[2]
+	return parts[0], parts[1], parts[2], parts[3]
 }
 
 // historyGateway normalizes gateway names the same way account counters do
@@ -62,10 +68,10 @@ func historyGateway(gateway string) string {
 }
 
 // recordHistory adds one request to today's bucket for the given dimensions.
-func (u *UsageTracker) recordHistory(clientKeyID, gateway, model string, prompt, completion, cacheRead, cacheWrite int) {
+func (u *UsageTracker) recordHistory(clientKeyID, gateway, model, accountID string, prompt, completion, cacheRead, cacheWrite int) {
 	now := usageNow()
 	day := usageDay(now)
-	key := usageHistoryKey(clientKeyID, historyGateway(gateway), model)
+	key := usageHistoryKey(clientKeyID, historyGateway(gateway), model, accountID)
 	u.accMu.Lock()
 	defer u.accMu.Unlock()
 	if u.history == nil {
@@ -144,12 +150,14 @@ type UsageHistoryRow struct {
 	KeyName     string `json:"key_name,omitempty"`
 	Gateway     string `json:"gateway,omitempty"`
 	Model       string `json:"model,omitempty"`
+	AccountID   string `json:"account_id,omitempty"`
+	AccountName string `json:"account_name,omitempty"`
 	UsageSnapshotEntry
 }
 
 // usageHistoryGroup selects which dimensions a query keeps.
 type usageHistoryGroup struct {
-	Day, Key, Gateway, Model bool
+	Day, Key, Gateway, Model, Account bool
 }
 
 func parseUsageHistoryGroup(raw string) (usageHistoryGroup, bool) {
@@ -168,6 +176,8 @@ func parseUsageHistoryGroup(raw string) (usageHistoryGroup, bool) {
 			g.Gateway = true
 		case "model":
 			g.Model = true
+		case "account":
+			g.Account = true
 		case "":
 		default:
 			return g, false
@@ -190,13 +200,16 @@ func (g usageHistoryGroup) String() string {
 	if g.Model {
 		parts = append(parts, "model")
 	}
+	if g.Account {
+		parts = append(parts, "account")
+	}
 	return strings.Join(parts, ",")
 }
 
 // QueryHistory sums the UTC days in [from, to] (inclusive, YYYY-MM-DD) by the
 // requested dimensions. Rows come sorted by day, then by tokens descending.
 func (u *UsageTracker) QueryHistory(from, to string, group usageHistoryGroup) ([]UsageHistoryRow, UsageSnapshotEntry) {
-	type rowKey struct{ day, key, gateway, model string }
+	type rowKey struct{ day, key, gateway, model, account string }
 	sums := map[rowKey]*UsageSnapshotEntry{}
 	var total UsageSnapshotEntry
 
@@ -206,7 +219,7 @@ func (u *UsageTracker) QueryHistory(from, to string, group usageHistoryGroup) ([
 			continue
 		}
 		for hk, c := range bucket {
-			keyID, gateway, model := usageHistorySplit(hk)
+			keyID, gateway, model, accountID := usageHistorySplit(hk)
 			rk := rowKey{}
 			if group.Day {
 				rk.day = day
@@ -219,6 +232,12 @@ func (u *UsageTracker) QueryHistory(from, to string, group usageHistoryGroup) ([
 			}
 			if group.Model {
 				rk.model = model
+			}
+			if group.Account {
+				rk.account = accountID
+				if rk.account == "" {
+					rk.account = unknownHistoryAccount
+				}
 			}
 			e := c.snapshot()
 			acc := sums[rk]
@@ -234,7 +253,7 @@ func (u *UsageTracker) QueryHistory(from, to string, group usageHistoryGroup) ([
 
 	rows := make([]UsageHistoryRow, 0, len(sums))
 	for rk, e := range sums {
-		rows = append(rows, UsageHistoryRow{Day: rk.day, ClientKeyID: rk.key, Gateway: rk.gateway, Model: rk.model, UsageSnapshotEntry: *e})
+		rows = append(rows, UsageHistoryRow{Day: rk.day, ClientKeyID: rk.key, Gateway: rk.gateway, Model: rk.model, AccountID: rk.account, UsageSnapshotEntry: *e})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Day != rows[j].Day {
@@ -247,6 +266,9 @@ func (u *UsageTracker) QueryHistory(from, to string, group usageHistoryGroup) ([
 		}
 		if rows[i].ClientKeyID != rows[j].ClientKeyID {
 			return rows[i].ClientKeyID < rows[j].ClientKeyID
+		}
+		if rows[i].AccountID != rows[j].AccountID {
+			return rows[i].AccountID < rows[j].AccountID
 		}
 		return rows[i].Model < rows[j].Model
 	})

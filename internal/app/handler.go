@@ -98,6 +98,7 @@ func handleChatCompletions(reg *Registry, cfg *Config, usage *UsageTracker) http
 			inner:   usage.RequestRecorder(gateway.Name(), acct, clientKeyIDFrom(r.Context()), req.Model),
 			keyName: keyName,
 			model:   req.Model,
+			account: accountLogName(acct),
 		}
 		if gateway.Name() == GatewayOpencode {
 			handleOpenAIResponse(w, resp, recorder)

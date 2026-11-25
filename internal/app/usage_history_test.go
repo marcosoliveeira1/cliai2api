@@ -197,7 +197,7 @@ func TestAdminUsageHistoryEndpoint(t *testing.T) {
 		t.Fatalf("explicit range total = %v", total)
 	}
 
-	for _, bad := range []string{"?group=account", "?period=month", "?from=21/11/2026", "?days=0", "?days=999"} {
+	for _, bad := range []string{"?group=bogus", "?period=month", "?from=21/11/2026", "?days=0", "?days=999"} {
 		resp, _ := adminRequest(t, srv, "GET", "/admin/api/usage/history"+bad, "admin-pass-123", nil)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", bad, resp.StatusCode)
@@ -279,5 +279,43 @@ func TestZenRelayRecordsSniffedUsageAndKeepsBytes(t *testing.T) {
 	rows, _ := u.QueryHistory("2026-11-21", "2026-11-21", usageHistoryGroup{Key: true, Gateway: true})
 	if len(rows) != 1 || rows[0].Gateway != GatewayZen || rows[0].PromptTokens != 30 {
 		t.Fatalf("zen history = %+v", rows)
+	}
+}
+
+func TestHistoryTracksUpstreamAccount(t *testing.T) {
+	pinUsageClock(t, time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC))
+	u := &UsageTracker{}
+	main, second := &Account{ID: "aMain"}, &Account{ID: "aSecond"}
+
+	u.RequestRecorder(GatewayCmdcode, main, "kHermes", "cmdcode/x").Record(100, 1, 0, 0)
+	u.RequestRecorder(GatewayCmdcode, second, "kHermes", "cmdcode/x").Record(30, 1, 0, 0)
+	u.RequestRecorder(GatewayCmdcode, second, "kN8n", "cmdcode/y").Record(5, 1, 0, 0)
+	// A bucket persisted before the account dimension existed (3-part key).
+	u.accMu.Lock()
+	u.history["2026-11-25"]["kOld|cmdcode|cmdcode/z"] = &UsageCounters{}
+	u.history["2026-11-25"]["kOld|cmdcode|cmdcode/z"].add(7, 0, 0, 0)
+	u.accMu.Unlock()
+
+	rows, total := u.QueryHistory("2026-11-25", "2026-11-25", usageHistoryGroup{Account: true})
+	got := map[string]int64{}
+	for _, r := range rows {
+		got[r.AccountID] = r.PromptTokens
+	}
+	if len(rows) != 3 || got["aMain"] != 100 || got["aSecond"] != 35 || got[unknownHistoryAccount] != 7 {
+		t.Fatalf("by account = %+v", rows)
+	}
+	if total.PromptTokens != 142 {
+		t.Fatalf("total = %+v", total)
+	}
+
+	// Without the account group, legacy and new buckets of one key still merge.
+	rows, _ = u.QueryHistory("2026-11-25", "2026-11-25", usageHistoryGroup{Key: true})
+	if len(rows) != 3 || rows[0].ClientKeyID != "kHermes" || rows[0].PromptTokens != 130 || rows[0].AccountID != "" {
+		t.Fatalf("by key = %+v", rows)
+	}
+
+	names := accountDisplayName([]*AccountPool{nil}, unknownHistoryAccount)
+	if names != "(unknown account)" {
+		t.Fatalf("unknown name = %q", names)
 	}
 }

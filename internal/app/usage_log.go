@@ -7,17 +7,19 @@ import (
 )
 
 // loggedUsageRecorder logs one line per finished chat request with the client
-// key, model and tokens, so the WebUI Logs tab shows who is spending what.
+// key, model, upstream account and tokens, so the WebUI Logs tab shows who is
+// spending what, and on which upstream account.
 type loggedUsageRecorder struct {
 	inner   usageRecorder
 	keyName string
 	model   string
+	account string
 }
 
 func (r *loggedUsageRecorder) Record(prompt, completion, cacheRead, cacheWrite int) {
 	r.inner.Record(prompt, completion, cacheRead, cacheWrite)
-	log.Printf("[INFO] usage key=%q model=%q prompt=%d completion=%d cache_read=%d cache_write=%d",
-		r.keyName, r.model, prompt, completion, cacheRead, cacheWrite)
+	log.Printf("[INFO] usage key=%q model=%q account=%q prompt=%d completion=%d cache_read=%d cache_write=%d",
+		r.keyName, r.model, r.account, prompt, completion, cacheRead, cacheWrite)
 }
 
 // openAIUsageSniffer watches a relayed OpenAI-compatible response (JSON or
